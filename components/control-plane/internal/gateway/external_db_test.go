@@ -2,13 +2,20 @@ package gateway
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	pq "github.com/lib/pq"
 	corev1 "k8s.io/api/core/v1"
@@ -438,7 +445,7 @@ func TestControllerDatabaseSecret(t *testing.T) {
 	cfg := ExternalDBConfig{CredentialsNamespace: "hypershell", CredentialsSecretName: "gateway-postgres"}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: cfg.CredentialsSecretName, Namespace: cfg.CredentialsNamespace},
-		Data:       map[string][]byte{"host": []byte("db.example.test"), "port": []byte("5432"), "user": []byte("admin"), "password": []byte("test-password")},
+		Data:       map[string][]byte{"host": []byte("db.example.test"), "port": []byte("5432"), "user": []byte("admin"), "password": []byte("test-password"), "sslrootcert": []byte(validTestCA(t))},
 	}
 	client := k8sfake.NewSimpleClientset(secret)
 	params, err := readExternalAdminCredentials(ctx, client, cfg)
@@ -494,6 +501,92 @@ func TestControllerDatabaseSecretFailureDoesNotFallBack(t *testing.T) {
 			for _, action := range client.Actions() {
 				if action.GetVerb() != "get" || action.GetResource().Resource != "secrets" || action.GetNamespace() != cfg.CredentialsNamespace {
 					t.Fatalf("unexpected fallback action: %v", action)
+				}
+			}
+		})
+	}
+}
+
+func validTestCA(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+func TestControllerAdminSecretTLSValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, ca, port string
+		valid                bool
+	}{
+		{"defaults", "", validTestCA(t), "5432", true},
+		{"verified", "verify-full", validTestCA(t), "5432", true},
+		{"plaintext", "disable", validTestCA(t), "5432", false},
+		{"unverified", "require", validTestCA(t), "5432", false},
+		{"no hostname check", "verify-ca", validTestCA(t), "5432", false},
+		{"missing CA", "verify-full", "", "5432", false},
+		{"invalid CA", "verify-full", testCAPEM, "5432", false},
+		{"invalid port", "verify-full", validTestCA(t), "65536", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ExternalDBConfig{CredentialsNamespace: "hypershell", CredentialsSecretName: "admin"}
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "admin", Namespace: "hypershell"},
+				Data: map[string][]byte{"host": []byte("db.test"), "port": []byte(tc.port), "user": []byte("admin"),
+					"password": []byte("secret-value"), "sslmode": []byte(tc.mode), "sslrootcert": []byte(tc.ca)}}
+			params, err := readExternalAdminCredentials(context.Background(), k8sfake.NewSimpleClientset(secret), cfg)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v: %v", tc.valid, err)
+			}
+			if err == nil && params.sslmode != "verify-full" {
+				t.Fatal("TLS mode was not verified")
+			}
+			if err != nil && strings.Contains(err.Error(), "secret-value") {
+				t.Fatal("error contains password")
+			}
+		})
+	}
+}
+
+func TestControllerAdminSecretDeleteReturnsError(t *testing.T) {
+	r := &externalDatabaseReconciler{cfg: ExternalDBConfig{CredentialsNamespace: "hypershell", CredentialsSecretName: "missing"}}
+	if err := r.Delete(context.Background(), nil, k8sfake.NewSimpleClientset(), "gateway"); err == nil {
+		t.Fatal("cleanup failure must reach the retry queue")
+	}
+}
+
+func TestExternalTenantSecretPreservesTLS(t *testing.T) {
+	for _, mode := range []string{"verify-full", "verify-ca", "require", "disable"} {
+		t.Run(mode, func(t *testing.T) {
+			p := &externalAdminParams{host: "2001:db8::1", port: "5432", user: "admin", password: "admin-password", sslmode: mode}
+			if mode == "verify-full" || mode == "verify-ca" {
+				p.sslrootcert = validTestCA(t)
+			}
+			data := externalTenantSecretData(p, "gw_test", "tenant-password")
+			uri, err := url.Parse(string(data["uri"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if uri.Hostname() != p.host || uri.Query().Get("sslmode") != mode {
+				t.Fatal("host or TLS mode changed")
+			}
+			if mode == "verify-full" || mode == "verify-ca" {
+				if uri.Query().Get("sslrootcert") != externalTenantCAPath || string(data["sslrootcert"]) != p.sslrootcert {
+					t.Fatal("CA was not propagated")
+				}
+			} else if uri.Query().Get("sslrootcert") != "" {
+				t.Fatal("legacy mode needs no CA mount")
+			}
+			for _, value := range data {
+				if strings.Contains(string(value), "admin-password") {
+					t.Fatal("admin password reached tenant")
 				}
 			}
 		})

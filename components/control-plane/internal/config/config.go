@@ -87,9 +87,9 @@ type Config struct {
 	// by CNPG remain compatible even when this default is "deployment".
 	DatabaseProvider string
 
-	// GatewayDatabaseSecret names the admin Secret in Namespace.
+	// GatewayDatabaseAdminSecretName names the admin Secret in Namespace.
 	// A non-empty value selects the controller-local database path.
-	GatewayDatabaseSecret string
+	GatewayDatabaseAdminSecretName string
 }
 
 func Load() (*Config, error) {
@@ -113,16 +113,16 @@ func Load() (*Config, error) {
 
 		GatewayReconcileWorkers: getEnvInt("GATEWAY_RECONCILE_WORKERS", DefaultGatewayReconcileWorkers, 1),
 
-		DatabaseProvider:      databaseProvider,
-		GatewayDatabaseSecret: os.Getenv("GATEWAY_DATABASE_SECRET"),
+		DatabaseProvider:               databaseProvider,
+		GatewayDatabaseAdminSecretName: os.Getenv("GATEWAY_DATABASE_ADMIN_SECRET_NAME"),
 	}
 
-	if cfg.GatewayDatabaseSecret != "" {
-		if problems := validation.IsDNS1123Subdomain(cfg.GatewayDatabaseSecret); len(problems) != 0 {
-			return nil, fmt.Errorf("invalid GATEWAY_DATABASE_SECRET: %s", strings.Join(problems, "; "))
+	if cfg.GatewayDatabaseAdminSecretName != "" {
+		if problems := validation.IsDNS1123Subdomain(cfg.GatewayDatabaseAdminSecretName); len(problems) != 0 {
+			return nil, fmt.Errorf("invalid GATEWAY_DATABASE_ADMIN_SECRET_NAME: %s", strings.Join(problems, "; "))
 		}
 		if problems := validation.IsDNS1123Label(cfg.Namespace); len(problems) != 0 {
-			return nil, fmt.Errorf("invalid HYPERSHELL_NAMESPACE for GATEWAY_DATABASE_SECRET: %s", strings.Join(problems, "; "))
+			return nil, fmt.Errorf("invalid HYPERSHELL_NAMESPACE for GATEWAY_DATABASE_ADMIN_SECRET_NAME: %s", strings.Join(problems, "; "))
 		}
 	}
 

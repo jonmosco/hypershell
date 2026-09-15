@@ -200,8 +200,8 @@ func main() {
 		}
 	}
 
-	if cfg.GatewayDatabaseSecret != "" && (clientset == nil || dynamicClient == nil) {
-		log.Fatalf("GATEWAY_DATABASE_SECRET requires Kubernetes clients")
+	if cfg.GatewayDatabaseAdminSecretName != "" && (clientset == nil || dynamicClient == nil) {
+		log.Fatalf("GATEWAY_DATABASE_ADMIN_SECRET_NAME requires Kubernetes clients")
 	}
 
 	// DATABASE_PROVIDER=cnpg is a hard startup precondition: the control plane
@@ -211,7 +211,7 @@ func main() {
 	// deferring the failure to the first CNPG-backed reconciliation deep
 	// inside the gateway/database reconcilers. DATABASE_PROVIDER=deployment (the
 	// default) never reaches this check and has no CNPG dependency at all.
-	if cfg.GatewayDatabaseSecret == "" && cfg.DatabaseProvider == config.DatabaseProviderCNPG {
+	if cfg.GatewayDatabaseAdminSecretName == "" && cfg.DatabaseProvider == config.DatabaseProviderCNPG {
 		if clientset == nil {
 			log.Fatalf("DATABASE_PROVIDER=cnpg requires an in-cluster Kubernetes client to verify the CNPG API prerequisites")
 		}
@@ -253,10 +253,10 @@ func main() {
 
 	clusterReconciler := reconciler.NewManagedClusterReconciler()
 	var databaseReconciler watcher.Handler[*pb.ManagedDatabase]
-	if managedDatabaseWatchEligible(clientset, dynamicClient, cfg.GatewayDatabaseSecret) {
+	if managedDatabaseWatchEligible(clientset, dynamicClient, cfg.GatewayDatabaseAdminSecretName) {
 		databaseReconciler = reconciler.NewManagedDatabaseReconciler(dynamicClient, clientset, conn, cfg.Namespace)
-	} else if cfg.GatewayDatabaseSecret != "" {
-		log.Printf("INFO ManagedDatabase watch disabled: GATEWAY_DATABASE_SECRET selects %s/%s", cfg.Namespace, cfg.GatewayDatabaseSecret)
+	} else if cfg.GatewayDatabaseAdminSecretName != "" {
+		log.Printf("INFO ManagedDatabase watch disabled: GATEWAY_DATABASE_ADMIN_SECRET_NAME selects %s/%s", cfg.Namespace, cfg.GatewayDatabaseAdminSecretName)
 	} else {
 		log.Printf("WARN ManagedDatabase watch disabled: both Kubernetes typed and dynamic clients are required")
 	}
@@ -305,10 +305,10 @@ func main() {
 	var gatewayReconciler watcher.Handler[*pb.Gateway]
 
 	if clientset != nil && dynamicClient != nil {
-		gr, grErr := reconciler.NewGatewayReconciler(dynamicClient, clientset, conn, manifestsDir, cfg.Namespace, keycloakConfig, exposurePort, cfg.GatewayDatabaseSecret)
+		gr, grErr := reconciler.NewGatewayReconciler(dynamicClient, clientset, conn, manifestsDir, cfg.Namespace, keycloakConfig, exposurePort, cfg.GatewayDatabaseAdminSecretName)
 		if grErr != nil {
-			if cfg.GatewayDatabaseSecret != "" {
-				log.Fatalf("initialize gateway reconciler with GATEWAY_DATABASE_SECRET: %v", grErr)
+			if cfg.GatewayDatabaseAdminSecretName != "" {
+				log.Fatalf("initialize gateway reconciler with GATEWAY_DATABASE_ADMIN_SECRET_NAME: %v", grErr)
 			}
 			log.Printf("WARN gateway reconciler disabled: %v", grErr)
 			gatewayReconciler = reconciler.NewStubGatewayReconciler()

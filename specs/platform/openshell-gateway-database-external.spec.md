@@ -1,6 +1,6 @@
 # OpenShell Gateway Database Specification - External Provider
 
-**Date:** 2026-09-07
+**Date:** 2026-09-15
 **Status:** Active
 **Parent:** [`openshell-gateway-database.spec.md`](./openshell-gateway-database.spec.md) - gateway database provisioning
 
@@ -58,6 +58,16 @@ SHALL NOT select a weaker mode for this override. The controller SHALL read the
 current Secret for each database provisioning or cleanup attempt. It SHALL NOT
 write the admin Secret or log credential values.
 
+The provisioning account SHALL have `CREATEDB`, `CREATEROLE`, and permission to
+manage the gateway roles and terminate their sessions. The controller SHALL grant
+each gateway role to that account so a non-superuser can create its database.
+
+#### Scenario: Non-superuser provisioning account
+
+- GIVEN a PostgreSQL account with the required privileges and no superuser access
+- WHEN the controller provisions and deletes a gateway
+- THEN it SHALL create and remove the gateway database and role successfully
+
 The Secret MAY be synchronized from a secret manager by External Secrets
 Operator. GitOps configuration SHALL contain Secret references and field mappings;
 it SHALL NOT contain production passwords. Provisioning SHALL fail and retry
@@ -103,7 +113,7 @@ selected through the existing external provider.
 
 For the override, gateway deletion SHALL remove its SQL database and role.
 An absent object SHALL count as already removed. A failed existence query,
-connection, or SQL statement SHALL NOT count as successful cleanup. The
+connection, or DROP statement SHALL NOT count as successful cleanup. The
 controller SHALL return the error to the gateway retry queue and record an
 `IncompleteFinalization` Warning Event in the controller namespace. The Event
 SHALL identify the gateway and Secret reference without credential values.
@@ -196,7 +206,7 @@ responsibility, out-of-band, before an `external` ManagedDatabase is created:
 5. **Server-side log verbosity restricted.** `CREATE ROLE` and `ALTER ROLE`
    statements carry the plaintext password in the statement text (the PostgreSQL
    wire protocol has no separate credential-binding channel for these statements).
-   Operators SHOULD set `log_statement` to `'mod'` or lower, or enable server-side
+   Operators SHOULD set `log_statement` to `'none'`, or enable server-side
    log redaction, on any external server used with this provider. HyperShell
    redacts credentials in its own application logs and error messages; server-side
    redaction is the operator's responsibility and HyperShell cannot enforce it.
