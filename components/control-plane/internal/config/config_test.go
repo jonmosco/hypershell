@@ -163,3 +163,30 @@ func TestResolveDatabaseProvider(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadGatewayDatabaseSecret(t *testing.T) {
+	t.Setenv("DATABASE_PROVIDER", "cnpg")
+	for _, tc := range []struct {
+		name, secret, namespace string
+		wantErr                 bool
+	}{
+		{"unset", "", "hypershell", false},
+		{"configured", "gateway-postgres", "hypershell", false},
+		{"dotted name", "gateway.postgres", "hypershell", false},
+		{"namespace reference rejected", "other/secret", "hypershell", true},
+		{"spaces rejected", " gateway-postgres ", "hypershell", true},
+		{"invalid namespace", "gateway-postgres", "other/namespace", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GATEWAY_DATABASE_SECRET", tc.secret)
+			t.Setenv("HYPERSHELL_NAMESPACE", tc.namespace)
+			cfg, err := Load()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Load() error = %v, want error %v", err, tc.wantErr)
+			}
+			if err == nil && cfg.GatewayDatabaseSecret != tc.secret {
+				t.Fatalf("secret = %q, want %q", cfg.GatewayDatabaseSecret, tc.secret)
+			}
+		})
+	}
+}

@@ -26,6 +26,47 @@ required and no in-cluster PostgreSQL workload is created.
 
 PostgreSQL is the only supported backend.
 
+### Controller Secret override
+
+`GATEWAY_DATABASE_SECRET` selects an optional controller-local path. Its value
+SHALL be a Secret name in `HYPERSHELL_NAMESPACE`. It SHALL NOT contain a
+namespace reference or credentials.
+
+When this variable is non-empty, the controller SHALL use that Secret for all
+gateway database provisioning and deletion assigned to the controller. It
+SHALL skip the `ManagedDatabase` watch, database lookup, and CNPG startup
+requirements. The existing SQL code SHALL create one database and login role
+per gateway and write the gateway credential Secret. The controller SHALL NOT
+provision a PostgreSQL server.
+
+The configured Secret uses the keys in this specification: `host`, `port`,
+`user`, and `password` are required; `dbname`, `sslmode`, and `sslrootcert` are
+optional. The controller SHALL read the Secret again during reconciliation.
+A missing or invalid Secret SHALL cause provisioning to fail. The controller
+SHALL NOT fall back to `ManagedDatabase` or create an in-cluster database.
+Deletion retains the external provider's existing cleanup behavior.
+
+For example, set the controller environment to:
+
+```yaml
+- name: GATEWAY_DATABASE_SECRET
+  value: gateway-postgres
+```
+
+Create `gateway-postgres` in the controller namespace before provisioning
+new gateways. Use this mode only when the configured server is the correct
+server for all gateways assigned to that controller. Changing a server endpoint
+or enabling the override does not migrate existing data. Removing the override
+restores the existing database selection path.
+
+This override does not change the API. The API still assigns `database_id`
+under its configured `DATABASE_PROVIDER`. With the default `deployment`
+provider, it still creates a `ManagedDatabase` record for each gateway. The
+controller ignores those records in override mode and does not delete them.
+Database inventory therefore does not describe the controller's SQL databases.
+With API providers `cnpg` or `external`, the existing registration requirements
+still apply. The contracts below describe the path without this override.
+
 ### Contracts this spec builds on
 
 External mode participates in the shared gateway-database contracts defined by the

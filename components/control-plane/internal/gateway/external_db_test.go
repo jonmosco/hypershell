@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -429,5 +430,72 @@ func TestExternalDatabaseReconcilerDeleteNoopsWithoutIdentifiers(t *testing.T) {
 func TestExternalGatewayDBName(t *testing.T) {
 	if got := externalGatewayDBName("2J5K7M9PqrsTvwxyz"); got != "gw_2j5k7m9pqrstvwxyz" {
 		t.Errorf("externalGatewayDBName() = %q, want lowercased gw_ name", got)
+	}
+}
+
+func TestControllerDatabaseSecret(t *testing.T) {
+	ctx := context.Background()
+	cfg := ExternalDBConfig{CredentialsNamespace: "hypershell", CredentialsSecretName: "gateway-postgres"}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: cfg.CredentialsSecretName, Namespace: cfg.CredentialsNamespace},
+		Data:       map[string][]byte{"host": []byte("db.example.test"), "port": []byte("5432"), "user": []byte("admin"), "password": []byte("test-password")},
+	}
+	client := k8sfake.NewSimpleClientset(secret)
+	params, err := readExternalAdminCredentials(ctx, client, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.host != "db.example.test" || params.user != "admin" {
+		t.Fatal("credentials do not match the configured Secret")
+	}
+	actions := client.Actions()
+	if len(actions) != 1 || actions[0].GetVerb() != "get" || actions[0].GetNamespace() != cfg.CredentialsNamespace {
+		t.Fatalf("unexpected Secret access: %v", actions)
+	}
+
+	// Read current credentials on the next reconciliation.
+	secret.Data["password"] = []byte("replacement-password")
+	if _, err := client.CoreV1().Secrets(cfg.CredentialsNamespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	params, err = readExternalAdminCredentials(ctx, client, cfg)
+	if err != nil || params.password != "replacement-password" {
+		t.Fatalf("updated credentials were not read: %v", err)
+	}
+
+	// An API reference must still obey the legacy namespace restriction.
+	cfg.CredentialsSecretName = ""
+	if _, err := readExternalAdminCredentials(ctx, client, cfg); err == nil {
+		t.Fatal("legacy namespace restriction was bypassed")
+	}
+}
+
+func TestControllerDatabaseSecretFailureDoesNotFallBack(t *testing.T) {
+	for _, missing := range []bool{true, false} {
+		t.Run(fmt.Sprintf("missing=%v", missing), func(t *testing.T) {
+			cfg := ExternalDBConfig{CredentialsNamespace: "hypershell", CredentialsSecretName: "gateway-postgres"}
+			client := k8sfake.NewSimpleClientset()
+			if !missing {
+				_, err := client.CoreV1().Secrets(cfg.CredentialsNamespace).Create(context.Background(), &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: cfg.CredentialsSecretName},
+					Data:       map[string][]byte{"host": []byte("db.example.test")},
+				}, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			client.ClearActions()
+			if err := ReconcileExternalDatabaseResources(context.Background(), client, "gateway-ns", "gateway-id", cfg); err == nil {
+				t.Fatal("provisioning must fail when credentials are missing or invalid")
+			}
+			if err := DeleteExternalDatabaseResources(context.Background(), client, cfg, "gateway-id"); err == nil {
+				t.Fatal("cleanup must report missing or invalid credentials")
+			}
+			for _, action := range client.Actions() {
+				if action.GetVerb() != "get" || action.GetResource().Resource != "secrets" || action.GetNamespace() != cfg.CredentialsNamespace {
+					t.Fatalf("unexpected fallback action: %v", action)
+				}
+			}
+		})
 	}
 }

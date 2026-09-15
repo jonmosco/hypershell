@@ -141,19 +141,31 @@ func readExternalAdminSecret(ctx context.Context, clientset kubernetes.Interface
 		return nil, fmt.Errorf("connection_secret validation: %w", err)
 	}
 
-	secret, err := clientset.CoreV1().Secrets(credentialsNamespace).Get(ctx, externalCredentialsSecretName, metav1.GetOptions{})
+	return readAdminSecret(ctx, clientset, credentialsNamespace, externalCredentialsSecretName)
+}
+
+// readExternalAdminCredentials uses the configured Secret or the legacy reference.
+func readExternalAdminCredentials(ctx context.Context, clientset kubernetes.Interface, cfg ExternalDBConfig) (*externalAdminParams, error) {
+	if cfg.CredentialsSecretName == "" {
+		return readExternalAdminSecret(ctx, clientset, cfg.CredentialsNamespace)
+	}
+	return readAdminSecret(ctx, clientset, cfg.CredentialsNamespace, cfg.CredentialsSecretName)
+}
+
+func readAdminSecret(ctx context.Context, clientset kubernetes.Interface, credentialsNamespace, secretName string) (*externalAdminParams, error) {
+	secret, err := clientset.CoreV1().Secrets(credentialsNamespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			return nil, fmt.Errorf("secret %q not found in namespace %q", externalCredentialsSecretName, credentialsNamespace)
+			return nil, fmt.Errorf("secret %q not found in namespace %q", secretName, credentialsNamespace)
 		}
-		return nil, fmt.Errorf("read Secret %q in namespace %q: %w", externalCredentialsSecretName, credentialsNamespace, err)
+		return nil, fmt.Errorf("read Secret %q in namespace %q: %w", secretName, credentialsNamespace, err)
 	}
 
 	get := func(key string) string { return string(secret.Data[key]) }
 	required := []string{"host", "port", "user", "password"}
 	for _, k := range required {
 		if get(k) == "" {
-			return nil, fmt.Errorf("secret %q in namespace %q is missing required key %q", externalCredentialsSecretName, credentialsNamespace, k)
+			return nil, fmt.Errorf("secret %q in namespace %q is missing required key %q", secretName, credentialsNamespace, k)
 		}
 	}
 
@@ -327,7 +339,7 @@ func mapConnErrorToStatus(err error) string {
 // admin role's CREATEDB and CREATEROLE attributes, and returns a
 // closed-vocabulary status string. It is side-effect-free on the server.
 func ProbeExternalServer(ctx context.Context, clientset kubernetes.Interface, cfg ExternalDBConfig) string {
-	params, err := readExternalAdminSecret(ctx, clientset, cfg.CredentialsNamespace)
+	params, err := readExternalAdminCredentials(ctx, clientset, cfg)
 	if err != nil {
 		log.Printf("INFO external DB probe (namespace %s): %s: %v", cfg.CredentialsNamespace, ExternalDBStatusSecretInvalid, err)
 		return ExternalDBStatusSecretInvalid
@@ -381,7 +393,7 @@ func ReconcileExternalDatabaseResources(
 	gatewayID string,
 	cfg ExternalDBConfig,
 ) error {
-	params, err := readExternalAdminSecret(ctx, clientset, cfg.CredentialsNamespace)
+	params, err := readExternalAdminCredentials(ctx, clientset, cfg)
 	if err != nil {
 		return fmt.Errorf("read external admin credentials: %w", err)
 	}
@@ -566,7 +578,7 @@ func DeleteExternalDatabaseResources(
 		return nil
 	}
 
-	params, err := readExternalAdminSecret(ctx, clientset, cfg.CredentialsNamespace)
+	params, err := readExternalAdminCredentials(ctx, clientset, cfg)
 	if err != nil {
 		return fmt.Errorf("cannot read external admin credentials: %w", err)
 	}
