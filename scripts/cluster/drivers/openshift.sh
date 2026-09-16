@@ -1345,6 +1345,13 @@ verify_owned_namespace() {
     warn "Namespace ${ns} does not exist"
     return 1
   fi
+  # FORCE=true is the explicit override for unlabeled leftovers (labeling is
+  # often forbidden on shared clusters). Reserved names stay refused in
+  # validate_namespace_group even when FORCE is set.
+  if [[ "${FORCE:-}" == "true" ]]; then
+    warn "FORCE=true: skipping ownership check for ${ns}"
+    return 0
+  fi
   local owned env_id
   owned="$(namespace_label_value "${ns}" "${OWNED_LABEL}")"
   env_id="$(namespace_label_value "${ns}" "${ENV_LABEL}")"
@@ -1353,11 +1360,11 @@ verify_owned_namespace() {
   # developer's currently selected project, but down cannot prove that this
   # lifecycle created it; deleting it could erase unrelated workloads.
   if [[ "${owned}" != "true" || -z "${env_id}" ]]; then
-    error "Namespace '${ns}' is not a complete HyperShell environment (expected ${OWNED_LABEL}=true and ${ENV_LABEL}). Refusing to delete it."
+    error "Namespace '${ns}' is not a complete HyperShell environment (expected ${OWNED_LABEL}=true and ${ENV_LABEL}). Refusing to delete it. Re-run with FORCE=true to override."
     exit 1
   fi
   if [[ -n "${OPENSHIFT_ENVIRONMENT_ID:-}" && "${env_id}" != "${OPENSHIFT_ENVIRONMENT_ID}" ]]; then
-    error "Namespace '${ns}' belongs to environment '${env_id}', not '${OPENSHIFT_ENVIRONMENT_ID}'. Refusing to delete it."
+    error "Namespace '${ns}' belongs to environment '${env_id}', not '${OPENSHIFT_ENVIRONMENT_ID}'. Refusing to delete it. Re-run with FORCE=true to override."
     exit 1
   fi
   OPENSHIFT_ENVIRONMENT_ID="${env_id}"
@@ -1504,21 +1511,16 @@ cluster_down() {
     info "No namespace group found for ${OPENSHIFT_NAMESPACE} / ${OPENSHIFT_KEYCLOAK_NAMESPACE}; still reaping instance-managed leftovers"
   fi
 
-  info "Deleting this environment's cluster-scoped RBAC..."
-  local prefix="${OPENSHIFT_NAMESPACE}-dev-"
-  oc_cli delete clusterrolebinding "${prefix}hypershell-controller-scc-bind" --ignore-not-found >/dev/null 2>&1 || true
-  oc_cli delete clusterrolebinding "${prefix}hypershell-controller" --ignore-not-found >/dev/null 2>&1 || true
-  oc_cli delete clusterrole "${prefix}hypershell-controller-scc-bind" --ignore-not-found >/dev/null 2>&1 || true
-  oc_cli delete clusterrole "${prefix}hypershell-controller" --ignore-not-found >/dev/null 2>&1 || true
-
-  if [[ "${ok_keycloak}" == "true" || "${ok_platform}" == "true" ]]; then
-    info "Removing namespace group ${OPENSHIFT_NAMESPACE} and ${OPENSHIFT_KEYCLOAK_NAMESPACE}"
-    remove_project "${OPENSHIFT_KEYCLOAK_NAMESPACE}"
-    remove_project "${OPENSHIFT_NAMESPACE}"
+  # Shared deletion path with the PR-environment reaper so adding a resource
+  # to teardown takes effect in both. Local swap files are CI-irrelevant and
+  # stay here.
+  info "Deleting this environment's cluster-scoped RBAC, namespace group, and instance-managed namespaces..."
+  if ! OPENSHIFT_NAMESPACE="${OPENSHIFT_NAMESPACE}" \
+    PR_ENV_KUBECTL="${OC:-oc}" \
+    bash "${REPO_ROOT}/scripts/ci/teardown-pr-env.sh"; then
+    error "Failed to tear down ${OPENSHIFT_NAMESPACE}"
+    return 1
   fi
-  # After the controller is gone (or when the platform project was already
-  # absent) delete sibling gateway/database namespaces this instance stamped.
-  delete_instance_managed_namespaces "${OPENSHIFT_NAMESPACE}"
   clear_all_openshift_swaps
   success "Environment ${OPENSHIFT_NAMESPACE} (and ${OPENSHIFT_KEYCLOAK_NAMESPACE}) removed"
 }

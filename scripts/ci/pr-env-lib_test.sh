@@ -54,8 +54,11 @@ assert_eq 'true' "$([[ ${#big_ns} -le 54 ]] && echo true || echo false)" 'platfo
 base=1000000000  # 2001-09-09T01:46:40Z
 assert_eq '2001-09-09T01:46:40Z' "$(pr_env_epoch_to_rfc3339 "${base}")" 'epoch -> rfc3339'
 assert_eq "${base}" "$(pr_env_rfc3339_to_epoch "$(pr_env_epoch_to_rfc3339 "${base}")")" 'rfc3339 -> epoch round-trip'
-# 3-day expiry is exactly 3*86400 seconds ahead.
-assert_eq "$(pr_env_epoch_to_rfc3339 $((base + 3 * 86400)))" "$(pr_env_expires_at 3 "${base}")" 'expires_at is now + days'
+# 72-hour retained max is exactly 72*3600 seconds ahead.
+assert_eq "$(pr_env_epoch_to_rfc3339 $((base + 72 * 3600)))" "$(pr_env_expires_at_hours 72 "${base}")" 'expires_at_hours retained default'
+# 24-hour unretained max is exactly 24*3600 seconds ahead.
+assert_eq '24' "${PR_ENV_UNRETAINED_MAX_HOURS}" 'unretained default hours'
+assert_eq "$(pr_env_epoch_to_rfc3339 $((base + 24 * 3600)))" "$(pr_env_expires_at_hours 24 "${base}")" 'expires_at_hours unretained default'
 
 # --- Reaper predicate ---
 now=2000000000
@@ -136,12 +139,28 @@ case "${deploying_body}" in
   *) PASS=$((PASS + 1)) ;;
 esac
 case "${deploying_body}" in
-  *'Deploying commit `abcdef1` to an ephemeral OpenShift environment.'*) PASS=$((PASS + 1)) ;;
+  *'Deploying commit `abcdef1` to an ephemeral OpenShift environment. This comment will update in place once the environment is ready.'*) PASS=$((PASS + 1)) ;;
   *) FAIL=$((FAIL + 1)); echo 'FAIL: first-deploy placeholder missing deploying wording' ;;
+esac
+case "${deploying_body}" in
+  *$'. This\ncomment'*) FAIL=$((FAIL + 1)); echo 'FAIL: deploying sentence must not wrap at 80 chars' ;;
+  *) PASS=$((PASS + 1)) ;;
 esac
 case "${deploying_body}" in
   *'may not be fully responsive'*) FAIL=$((FAIL + 1)); echo 'FAIL: first-deploy placeholder must not warn about an existing environment' ;;
   *) PASS=$((PASS + 1)) ;;
+esac
+case "${deploying_body}" in
+  *'/pr-extend'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: deploying comment missing /pr-extend' ;;
+esac
+case "${deploying_body}" in
+  *'destroyed once e2e testing concludes'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: deploying comment missing destroy-after-e2e wording' ;;
+esac
+case "${deploying_body}" in
+  *'already been destroyed'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: deploying comment missing redeploy-if-destroyed wording' ;;
 esac
 
 # A later reconcile must keep the existing table: those facts do not change
@@ -209,6 +228,60 @@ case "${second_update}" in
   *) PASS=$((PASS + 1)) ;;
 esac
 
+# --- Slash commands: body parse, permission, latest-wins ---
+assert_eq 'extend' "$(pr_env_command_from_body '/pr-extend')" 'bare /pr-extend'
+assert_eq 'extend' "$(pr_env_command_from_body $'/pr-extend\nplease keep it')" '/pr-extend with trailing text'
+assert_eq 'extend' "$(pr_env_command_from_body '  /pr-extend  ')" '/pr-extend with surrounding whitespace'
+assert_eq 'destroy' "$(pr_env_command_from_body '/pr-destroy')" 'bare /pr-destroy'
+assert_eq 'destroy' "$(pr_env_command_from_body '/pr-destroy now')" '/pr-destroy with trailing text'
+assert_eq '' "$(pr_env_command_from_body '/pr-extended')" '/pr-extended is not /pr-extend'
+assert_eq '' "$(pr_env_command_from_body '/pr-destroyed')" '/pr-destroyed is not /pr-destroy'
+assert_eq '' "$(pr_env_command_from_body 'please /pr-extend')" 'command must begin the body'
+assert_eq '' "$(pr_env_command_from_body '')" 'empty body is not a command'
+
+if pr_env_permission_is_authorized write; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo 'FAIL: write is authorized'; fi
+if pr_env_permission_is_authorized maintain; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo 'FAIL: maintain is authorized'; fi
+if pr_env_permission_is_authorized admin; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo 'FAIL: admin is authorized'; fi
+if pr_env_permission_is_authorized read; then FAIL=$((FAIL + 1)); echo 'FAIL: read must not be authorized'; else PASS=$((PASS + 1)); fi
+if pr_env_permission_is_authorized triage; then FAIL=$((FAIL + 1)); echo 'FAIL: triage must not be authorized'; else PASS=$((PASS + 1)); fi
+if pr_env_permission_is_authorized ''; then FAIL=$((FAIL + 1)); echo 'FAIL: empty permission must not be authorized'; else PASS=$((PASS + 1)); fi
+
+assert_eq 'extend' "$(printf '%s\n' \
+  $'2026-09-16T10:00:00Z\talice\twrite\t/pr-extend' \
+  $'2026-09-16T11:00:00Z\talice\twrite\t/pr-destroy' \
+  $'2026-09-16T12:00:00Z\talice\twrite\t/pr-extend' \
+  | pr_env_select_latest_command)" 'latest of extend/destroy/extend is extend'
+
+assert_eq 'destroy' "$(printf '%s\n' \
+  $'2026-09-16T12:00:00Z\talice\twrite\t/pr-destroy' \
+  $'2026-09-16T10:00:00Z\talice\twrite\t/pr-extend' \
+  | pr_env_select_latest_command)" 'out-of-order rows still pick latest created_at'
+
+assert_eq 'extend' "$(printf '%s\n' \
+  $'2026-09-16T10:00:00Z\talice\twrite\t/pr-extend' \
+  $'2026-09-16T11:00:00Z\tbob\tread\t/pr-destroy' \
+  | pr_env_select_latest_command)" 'unauthorized /pr-destroy does not count'
+
+assert_eq 'none' "$(printf '%s\n' \
+  $'2026-09-16T11:00:00Z\tbob\tread\t/pr-extend' \
+  | pr_env_select_latest_command)" 'only unauthorized commands -> none'
+
+assert_eq 'none' "$(printf '%s\n' | pr_env_select_latest_command)" 'no comments -> none'
+
+refusal="$(pr_env_refusal_comment bob /pr-extend)"
+case "${refusal}" in
+  *'@bob'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: refusal comment missing user'; ;;
+esac
+case "${refusal}" in
+  *'/pr-extend'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: refusal comment missing command'; ;;
+esac
+case "${refusal}" in
+  *'unchanged'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: refusal comment missing unchanged wording'; ;;
+esac
+
 # --- Comment body ---
 body="$(pr_env_comment_body 232 abcdef1234567 hypershell-ci-pr-232 hypershell-ci-pr-232-keycloak \
   https://console.example.com https://api.pr-232.example.com https://web.pr-232.example.com \
@@ -235,6 +308,99 @@ case "${updated_body}" in
   *'updated to commit'*) PASS=$((PASS + 1)) ;;
   *) FAIL=$((FAIL + 1)); echo 'FAIL: updated comment missing update wording' ;;
 esac
+# Unretained comment advertises /pr-extend and never implies the env persists.
+case "${body}" in
+  *'/pr-extend'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: unretained comment missing /pr-extend' ;;
+esac
+case "${body}" in
+  *'keep this environment active'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: unretained comment missing keep-active wording' ;;
+esac
+case "${body}" in
+  *'destroyed once e2e testing concludes'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: unretained comment missing destroy-after-e2e wording' ;;
+esac
+case "${body}" in
+  *'already been destroyed'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: unretained comment missing redeploy-if-destroyed wording' ;;
+esac
+case "${body}" in
+  *'refreshed on every new commit'*) FAIL=$((FAIL + 1)); echo 'FAIL: unretained comment implied persistence' ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
+retained_body="$(pr_env_comment_body 232 abcdef1234567 ns ns-keycloak c a w https://api.cluster.example.com false true)"
+case "${retained_body}" in
+  *'retained and renewed on every commit'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: retained comment missing retained wording' ;;
+esac
+case "${retained_body}" in
+  *'inactivity timebox'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: retained comment missing inactivity timebox' ;;
+esac
+case "${retained_body}" in
+  *'destroyed once e2e testing concludes'*) FAIL=$((FAIL + 1)); echo 'FAIL: retained comment said env is about to be destroyed' ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
+retained_deploying="$(pr_env_comment_deploying_body abcdef1234567 '' true)"
+case "${retained_deploying}" in
+  *'retained and renewed on every commit'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: retained deploying comment missing retained wording' ;;
+esac
+case "${retained_deploying}" in
+  *'destroyed once e2e testing concludes'*) FAIL=$((FAIL + 1)); echo 'FAIL: retained deploying comment said env is about to be destroyed' ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
+
+destroyed_body="$(pr_env_comment_destroyed_body)"
+case "${destroyed_body}" in
+  *"<!-- hypershell-pr-environment -->"*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: destroyed comment missing hidden marker' ;;
+esac
+case "${destroyed_body}" in
+  *'## HyperShell environment destroyed'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: destroyed comment missing destroyed heading' ;;
+esac
+case "${destroyed_body}" in
+  *'has been destroyed'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: destroyed comment missing destroyed wording' ;;
+esac
+case "${destroyed_body}" in
+  *'/pr-extend'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: destroyed comment missing /pr-extend' ;;
+esac
+case "${destroyed_body}" in
+  *'redeploy'*) PASS=$((PASS + 1)) ;;
+  *) FAIL=$((FAIL + 1)); echo 'FAIL: destroyed comment missing redeploy wording' ;;
+esac
+case "${destroyed_body}" in
+  *'live ephemeral'*) FAIL=$((FAIL + 1)); echo 'FAIL: destroyed comment still claims a live environment' ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
+case "${destroyed_body}" in
+  *'| Fact | Value |'*) FAIL=$((FAIL + 1)); echo 'FAIL: destroyed comment must not keep the access-fact table' ;;
+  *) PASS=$((PASS + 1)) ;;
+esac
+
+if grep -q 'PR_ENV_PHASE=destroyed' "${SCRIPT_DIR}/teardown-unretained-pr-env.sh"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo 'FAIL: unretained teardown does not update the access comment after destroy'
+fi
+if grep -q 'PR_ENV_PHASE=destroyed' "${SCRIPT_DIR}/../../.github/workflows/pr-environment-commands.yml"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo 'FAIL: /pr-destroy does not update the access comment after destroy'
+fi
+
+assert_eq 'true' "$(printf '%s' '[{"name":"pr-environment/pr-extended"}]' \
+  | pr_env_label_list_has 'pr-environment/pr-extended')" 'label list has retained'
+assert_eq 'false' "$(printf '%s' '[]' \
+  | pr_env_label_list_has 'pr-environment/pr-extended')" 'empty label list is not retained'
+assert_eq 'false' "$(printf '%s' '[{"name":"other"}]' \
+  | pr_env_label_list_has 'pr-environment/pr-extended')" 'unrelated labels are not retained'
 
 printf 'pr-env-lib tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

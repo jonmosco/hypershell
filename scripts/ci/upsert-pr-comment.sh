@@ -6,25 +6,32 @@
 # carrying the hidden marker and editing it in place, rather than posting a new
 # comment per run. Called twice per deploy run: once at the very start with
 # PR_ENV_PHASE=deploying, and again once the environment is ready with the real
-# access facts and an `oc login --web` template. The deploying phase posts a
-# no-facts placeholder on first deploy (so the comment is normally first on the
-# pull request and stays near the top of the timeline). On a later reconcile it
-# updates the heading to the new commit and keeps the existing access-fact
-# table, because those URLs and namespaces do not change from run to run.
-# OpenShift handles token retrieval and refresh interactively, so no credential
-# ever appears in the comment.
+# access facts and an `oc login --web` template. After unretained teardown or
+# /pr-destroy it is called with PR_ENV_PHASE=destroyed so the comment stops
+# claiming a live environment and advertises /pr-extend to redeploy.
+# The deploying phase posts a no-facts placeholder on first deploy (so the
+# comment is normally first on the pull request and stays near the top of the
+# timeline). On a later reconcile it updates the heading to the new commit and
+# keeps the existing access-fact table, because those URLs and namespaces do
+# not change from run to run. OpenShift handles token retrieval and refresh
+# interactively, so no credential ever appears in the comment.
 #
 # Requires `gh` (authenticated via GH_TOKEN) and `jq`.
 #
 # Environment:
 #   GH_REPO / GITHUB_REPOSITORY   owner/repo (gh reads GH_REPO)
 #   PR_NUMBER                     pull-request number (required)
-#   PR_HEAD_SHA                   head commit SHA (required)
+#   PR_HEAD_SHA                   head commit SHA (required for deploying/ready)
 #   PR_ENV_PHASE                  "deploying" (in-progress heading; posted
-#                                 first, keeps an existing access-fact table)
-#                                 or "ready" (default; full access facts)
+#                                 first, keeps an existing access-fact table),
+#                                 "ready" (default; full access facts), or
+#                                 "destroyed" (environment gone; /pr-extend to
+#                                 redeploy). Destroyed only edits an existing
+#                                 marked comment; it does not post a new one.
 #   PR_ENV_UPDATED                "true" for the per-commit update wording
 #                                 ("ready" phase only)
+#   PR_ENV_RETAINED               "true" when the pull request is marked
+#                                 retained (lifetime wording on both phases)
 #   PLATFORM_NS / KEYCLOAK_NS     namespace group ("ready" phase only)
 #   CONSOLE_URL / API_URL / WEB_URL / CLUSTER_API_URL   access URLs
 #                                 ("ready" phase only)
@@ -35,7 +42,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/pr-env-lib.sh"
 
 : "${PR_NUMBER:?PR_NUMBER is required}"
-: "${PR_HEAD_SHA:?PR_HEAD_SHA is required}"
 repo="${GH_REPO:-${GITHUB_REPOSITORY:?GH_REPO or GITHUB_REPOSITORY is required}}"
 
 # Find an existing marked comment first (paginate; the marker is unique to
@@ -48,13 +54,15 @@ existing_id="$(gh api --paginate \
 phase="${PR_ENV_PHASE:-ready}"
 case "${phase}" in
   deploying)
+    : "${PR_HEAD_SHA:?PR_HEAD_SHA is required}"
     existing_body=""
     if [[ -n "${existing_id}" ]]; then
       existing_body="$(gh api "repos/${repo}/issues/comments/${existing_id}" --jq .body)"
     fi
-    body="$(pr_env_comment_deploying_body "${PR_HEAD_SHA}" "${existing_body}")"
+    body="$(pr_env_comment_deploying_body "${PR_HEAD_SHA}" "${existing_body}" "${PR_ENV_RETAINED:-false}")"
     ;;
   ready)
+    : "${PR_HEAD_SHA:?PR_HEAD_SHA is required}"
     body="$(pr_env_comment_body \
       "${PR_NUMBER}" \
       "${PR_HEAD_SHA}" \
@@ -64,10 +72,18 @@ case "${phase}" in
       "${API_URL:-}" \
       "${WEB_URL:-}" \
       "${CLUSTER_API_URL:-}" \
-      "${PR_ENV_UPDATED:-false}")"
+      "${PR_ENV_UPDATED:-false}" \
+      "${PR_ENV_RETAINED:-false}")"
+    ;;
+  destroyed)
+    if [[ -z "${existing_id}" ]]; then
+      echo "No marked access comment to update after destroy"
+      exit 0
+    fi
+    body="$(pr_env_comment_destroyed_body)"
     ;;
   *)
-    echo "::error::Unknown PR_ENV_PHASE '${phase}' (want deploying or ready)" >&2
+    echo "::error::Unknown PR_ENV_PHASE '${phase}' (want deploying, ready, or destroyed)" >&2
     exit 1
     ;;
 esac
