@@ -10,6 +10,8 @@ import type {
   OpenShellGatewayServiceAccountConnection,
   OpenShellGatewayServiceAccountCredential,
   OpenShellGatewayServiceAccountRecord,
+  ProvisioningCondition,
+  ProvisioningConditionStatus,
 } from "@openshift-online/hypershell-gateway-management-ui";
 import {
   defaultGatewayListRequest,
@@ -107,6 +109,50 @@ function endpointFromRouteAddress(routeAddress: string): string | undefined {
   return routeAddress.replace(/^grpcs?:\/\//u, "");
 }
 
+const validConditionStatuses = new Set<string>([
+  "Pending",
+  "InProgress",
+  "Complete",
+  "Failed",
+]);
+
+function parseProvisioningConditions(
+  raw: unknown,
+): readonly ProvisioningCondition[] | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed)) {
+      return undefined;
+    }
+    const conditions: ProvisioningCondition[] = [];
+    for (const item of parsed) {
+      if (typeof item !== "object" || item === null) {
+        continue;
+      }
+      const record = item as Record<string, unknown>;
+      const type = typeof record.type === "string" ? record.type : "";
+      const status =
+        typeof record.condition_status === "string"
+          ? record.condition_status
+          : "";
+      if (!type || !validConditionStatuses.has(status)) {
+        continue;
+      }
+      conditions.push({
+        conditionStatus: status as ProvisioningConditionStatus,
+        message: typeof record.message === "string" ? record.message : "",
+        type,
+      });
+    }
+    return conditions.length > 0 ? conditions : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function toGatewayRecord(gateway: Gateway): GatewayRecord {
   const oidc = jsonObject(gateway.oidc);
   const oidcAudience = optionalString(oidc?.audience);
@@ -115,6 +161,10 @@ function toGatewayRecord(gateway: Gateway): GatewayRecord {
   const createdBy = optionalString(gateway.created_by);
   const activeSandboxCount = optionalNumber(gateway.active_sandbox_count);
   const consoleUrl = optionalString(gateway.console_address);
+  const gatewayVersion = optionalString(gateway.gateway_version);
+  const provisioningConditions = parseProvisioningConditions(
+    gateway.provisioning_conditions,
+  );
 
   return {
     ...(activeSandboxCount !== undefined ? { activeSandboxCount } : {}),
@@ -125,6 +175,7 @@ function toGatewayRecord(gateway: Gateway): GatewayRecord {
     databaseId: gateway.database_id,
     externalDns:
       gateway.external_dns || endpointFromRouteAddress(gateway.route_address),
+    ...(gatewayVersion ? { gatewayVersion } : {}),
     id: gateway.id,
     name: gateway.name,
     namespace: gateway.namespace,
@@ -132,6 +183,7 @@ function toGatewayRecord(gateway: Gateway): GatewayRecord {
     ...(oidcClientId ? { oidcClientId } : {}),
     ...(oidcIssuer ? { oidcIssuer } : {}),
     phase: gateway.phase,
+    ...(provisioningConditions ? { provisioningConditions } : {}),
     releaseId: gateway.release_id,
     status: gateway.status,
   };
@@ -488,7 +540,6 @@ export function createGatewayControlPlaneAdapter(
             {
               cluster_id: input.clusterId,
               database_id: "",
-              fleet_id: "",
               name: input.name,
               release_id: "",
               route: JSON.stringify({ enabled: true }),

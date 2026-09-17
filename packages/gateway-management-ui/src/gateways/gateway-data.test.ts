@@ -3,12 +3,15 @@ import { describe, expect, it } from "vitest";
 import { normalizeGatewayPlacementClusterIds } from "../application/gateway-placement";
 import type { GatewayRecord } from "../application/gateway-types";
 import {
+  aggregateGatewayDisplayStatusCounts,
+  gatewayPhaseCountsToDisplayStatusCounts,
   gatewayConsoleReadyDeadlineMilliseconds,
   gatewayConsoleUnavailable,
   gatewayNeedsStatusPolling,
   gatewayPlacementBatchQueryKey,
   gatewayStatusPollMilliseconds,
   resolveConsoleWaitStart,
+  resolveGatewayDisplayStatus,
   toGatewayConnection,
 } from "./gateway-data";
 
@@ -27,6 +30,7 @@ function gateway(overrides: Partial<GatewayRecord> = {}): GatewayRecord {
     createdAt: CREATED_AT,
     databaseId: "database-1",
     externalDns: "gateway.example.com",
+    gatewayVersion: " 0.0.109 ",
     id: "gateway-1",
     name: "Team gateway",
     namespace: "openshell",
@@ -64,6 +68,7 @@ describe("gateway presentation data", () => {
       clusterName: "Localized hub cluster",
       createdAt: "2026-08-10T14:30:00Z",
       endpoint: "https://gateway.example.com:443",
+      gatewayVersion: "0.0.109",
       id: "gateway-1",
       name: "Team gateway",
       phase: "Running",
@@ -136,6 +141,36 @@ describe("gateway presentation data", () => {
         gateway({ externalDns: undefined, phase: "Running" }),
         CONSOLE_WAIT_START,
         WITHIN_CONSOLE_WINDOW,
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps polling a running routed gateway until its version arrives", () => {
+    const noVersion = gateway({
+      consoleUrl: "https://console.example.com",
+      gatewayVersion: undefined,
+      phase: "Running",
+    });
+    expect(
+      gatewayNeedsStatusPolling(
+        noVersion,
+        CONSOLE_WAIT_START,
+        WITHIN_CONSOLE_WINDOW,
+      ),
+    ).toBe(true);
+
+    expect(
+      gatewayNeedsStatusPolling(
+        { ...noVersion, gatewayVersion: "v0.0.109-rh9a8f8" },
+        CONSOLE_WAIT_START,
+        WITHIN_CONSOLE_WINDOW,
+      ),
+    ).toBe(false);
+    expect(
+      gatewayNeedsStatusPolling(
+        noVersion,
+        CONSOLE_WAIT_START,
+        PAST_CONSOLE_WINDOW,
       ),
     ).toBe(false);
   });
@@ -287,6 +322,9 @@ describe("gateway presentation data", () => {
   });
 
   it("presents transitional and failed lifecycle phases before health", () => {
+    expect(resolveGatewayDisplayStatus("Provisioning", "Ready")).toBe(
+      "Provisioning",
+    );
     expect(
       toGatewayConnection(
         gateway({ phase: "Provisioning", status: "Ready" }),
@@ -305,6 +343,47 @@ describe("gateway presentation data", () => {
         "Hub cluster",
       ).status,
     ).toBe("Degraded");
+    expect(
+      toGatewayConnection(
+        gateway({ phase: "Running", status: "Healthy" }),
+        "Hub cluster",
+      ).status,
+    ).toBe("Healthy");
+  });
+
+  it("aggregates gateway list rows into dashboard status buckets", () => {
+    expect(
+      aggregateGatewayDisplayStatusCounts([
+        { phase: "Running", status: "Healthy" },
+        { phase: "Running", status: "Healthy" },
+        { phase: "Provisioning", status: "route pending" },
+        { phase: "Degraded", status: "CrashLoopBackOff" },
+        { phase: "Failed", status: "apply error" },
+        { phase: "Running", status: "Degraded" },
+      ]),
+    ).toEqual({
+      degraded: 2,
+      failed: 1,
+      healthy: 2,
+      provisioning: 1,
+    });
+  });
+
+  it("maps Prometheus phase counts into dashboard status buckets", () => {
+    expect(
+      gatewayPhaseCountsToDisplayStatusCounts({
+        Pending: 2,
+        Provisioning: 3,
+        Running: 10,
+        Degraded: 1,
+        Failed: 4,
+      }),
+    ).toEqual({
+      degraded: 1,
+      failed: 4,
+      healthy: 10,
+      provisioning: 5,
+    });
   });
 
   it("keeps a returned cluster identifier for name resolution only", () => {
@@ -321,13 +400,18 @@ describe("gateway presentation data", () => {
 
   it("keeps API-owned connection values unavailable when they are absent", () => {
     const connection = toGatewayConnection(
-      gateway({ externalDns: undefined, status: undefined }),
+      gateway({
+        externalDns: undefined,
+        gatewayVersion: undefined,
+        status: undefined,
+      }),
       "Hub cluster",
     );
 
     expect(connection.endpoint).toBeUndefined();
     expect(connection.consoleUrl).toBeUndefined();
+    expect(connection.gatewayVersion).toBeUndefined();
     expect(connection.oidcIssuer).toBeUndefined();
-    expect(connection.status).toBe("Unknown");
+    expect(connection.status).toBe("Provisioning");
   });
 });

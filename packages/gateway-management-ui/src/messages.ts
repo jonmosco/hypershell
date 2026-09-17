@@ -82,29 +82,58 @@ export const messages = defineMessages({
     defaultMessage: "Region: {region}",
     description: "Region context that distinguishes a managed cluster option.",
   },
+  connectionEditorOptions: {
+    id: "app.gateway.connection.editorOptions",
+    defaultMessage:
+      "Supported interactive editors are <code>vscode</code> and <code>cursor</code>.",
+    description:
+      "Info note listing the supported editor values for the connect-sandbox command. Editor names are wrapped in <code> tags.",
+  },
+  connectionEditorOptionsLink: {
+    id: "app.gateway.connection.editorOptionsLink",
+    defaultMessage: "OpenShell connect documentation",
+    description:
+      "Link text pointing to the OpenShell sandbox connect CLI documentation.",
+  },
+  connectionEditorOptionsLinkNewTab: {
+    id: "app.gateway.connection.editorOptionsLinkNewTab",
+    defaultMessage: "Sandbox connect reference (opens in a new tab)",
+    description:
+      "Accessible name for the sandbox connect docs link, including that it opens in a new tab.",
+  },
+  connectionEditorOptionsTitle: {
+    id: "app.gateway.connection.editorOptionsTitle",
+    defaultMessage: "Editor options",
+    description: "Title for the editor options info alert.",
+  },
   connectionInstallLink: {
     id: "app.gateway.connection.installLink",
-    defaultMessage: "Install the OpenShell CLI",
+    defaultMessage: "View installation documentation",
     description:
       "Link text pointing to the NVIDIA OpenShell installation documentation.",
   },
   connectionInstallLinkNewTab: {
     id: "app.gateway.connection.installLinkNewTab",
-    defaultMessage: "Install the OpenShell CLI (opens in a new tab)",
+    defaultMessage: "View installation documentation (opens in a new tab)",
     description:
-      "Accessible name for the OpenShell CLI install docs link, including that it opens in a new tab.",
+      "Accessible name for the OpenShell CLI installation documentation link, including that it opens in a new tab.",
   },
   connectionInstallPrereq: {
     id: "app.gateway.connection.installPrereq",
     defaultMessage:
-      "The OpenShell CLI must be installed before running the commands below.",
-    description:
-      "Prerequisite note shown above the connection steps directing operators to install the CLI first.",
+      "Install the OpenShell CLI version for this gateway before you add the provider.",
+    description: "Prerequisite note shown before the one-time setup commands.",
   },
   connectionInstallPrereqTitle: {
     id: "app.gateway.connection.installPrereqTitle",
     defaultMessage: "Prerequisite",
     description: "Title for the CLI installation prerequisite alert.",
+  },
+  connectionLoginConfigureTitle: {
+    id: "app.gateway.connection.loginConfigure.title",
+    defaultMessage: "Log in and configure",
+    description:
+      "Sub-header for the login and configuration command within one-time setup.",
   },
   connectionLoginUnavailable: {
     id: "app.gateway.connection.login.unavailable",
@@ -112,6 +141,17 @@ export const messages = defineMessages({
       "This gateway is still provisioning. Its connection command becomes available once the gateway is running.",
     description:
       "Shown in the login step while the gateway has not yet reached a running, ready-to-connect phase.",
+  },
+  connectionSandboxConnectDescription: {
+    id: "app.gateway.connection.sandboxConnect.description",
+    defaultMessage:
+      "Disconnecting does not stop the sandbox process. Connect attaches to the same process instance and replays recent output.",
+    description: "Supporting text for the connect-to-sandbox connection step.",
+  },
+  connectionSandboxConnectTitle: {
+    id: "app.gateway.connection.sandboxConnect.title",
+    defaultMessage: "Connect to a sandbox",
+    description: "Title for the connect-to-sandbox connection step.",
   },
   connectionSandboxDescription: {
     id: "app.gateway.connection.sandbox.description",
@@ -127,7 +167,7 @@ export const messages = defineMessages({
   connectionSetupDescription: {
     id: "app.gateway.connection.setup.description",
     defaultMessage:
-      "Run these once to log in, add the Claude on Vertex AI provider, and select the model.",
+      "Run these commands in order to register the gateway, add the Claude on Vertex AI provider, and select the model.",
     description: "Supporting text for the one-time setup connection step.",
   },
   connectionSetupTitle: {
@@ -144,6 +184,12 @@ export const messages = defineMessages({
     id: "app.gateway.connection.tabsLabel",
     defaultMessage: "Gateway connection, service accounts, and details",
     description: "Accessible label for the gateway detail tabs.",
+  },
+  connectionWaitingForProvisioning: {
+    id: "app.gateway.connection.waitingForProvisioning",
+    defaultMessage: "Waiting for gateway provisioning...",
+    description:
+      "Shown in the connection tab while the gateway is still being provisioned.",
   },
   copied: {
     id: "app.clipboard.copied",
@@ -172,16 +218,28 @@ export const messages = defineMessages({
     description:
       "Accessible label for copying a specific gateway's network endpoint.",
   },
+  copyInstallCommand: {
+    id: "app.gateway.connection.copyInstallCommand",
+    defaultMessage: "Copy the OpenShell installation command",
+    description:
+      "Accessible label for copying the version-matched OpenShell installation command.",
+  },
   copySandboxCommand: {
     id: "app.gateway.connection.copySandboxCommand",
     defaultMessage: "Copy the create-sandbox command",
     description: "Accessible label for copying the create-sandbox command.",
   },
+  copySandboxConnectCommand: {
+    id: "app.gateway.connection.copySandboxConnectCommand",
+    defaultMessage: "Copy the connect-sandbox command",
+    description:
+      "Accessible label for the button that copies the sandbox connect command.",
+  },
   copySetupCommand: {
     id: "app.gateway.connection.copySetupCommand",
     defaultMessage: "Copy the one-time setup commands",
     description:
-      "Accessible label for copying the consolidated one-time setup script.",
+      "Accessible label for copying the gateway registration, provider creation, and model selection commands.",
   },
   created: {
     id: "app.table.column.created",
@@ -220,6 +278,18 @@ export const messages = defineMessages({
     id: "app.gateway.detailsTab",
     defaultMessage: "Details",
     description: "Label for the gateway detail Details tab.",
+  },
+  editEditor: {
+    id: "app.gateway.connection.editEditor",
+    defaultMessage: "Editor",
+    description:
+      "Accessible label for the editor selector in the connect-sandbox command.",
+  },
+  editExistingSandboxName: {
+    id: "app.gateway.connection.editExistingSandboxName",
+    defaultMessage: "Existing sandbox name (editable)",
+    description:
+      "Accessible label for the inline-editable sandbox name in the connect-sandbox command.",
   },
   editModel: {
     id: "app.gateway.connection.editModel",
@@ -386,6 +456,12 @@ export const messages = defineMessages({
     defaultMessage: "Managed database ID",
     description: "Label for a gateway's managed database identifier.",
   },
+  manageServiceAccounts: {
+    id: "app.gateway.manageServiceAccounts",
+    defaultMessage: "Manage service accounts",
+    description:
+      "Link text that navigates to the service accounts tab from the connection tab.",
+  },
   moreClustersAvailable: {
     id: "app.gateway.cluster.moreResults",
     defaultMessage:
@@ -522,12 +598,6 @@ export const messages = defineMessages({
     defaultMessage:
       "Use service accounts for automation. Each account exchanges client credentials for short-lived JWTs that work only with this gateway.",
     description: "Introductory text for gateway service accounts.",
-  },
-  manageServiceAccounts: {
-    id: "app.gateway.serviceAccounts.manage",
-    defaultMessage: "Create or manage service accounts",
-    description:
-      "Link from the interactive connection workflow to service-account management.",
   },
   createServiceAccount: {
     id: "app.gateway.serviceAccounts.create",
@@ -935,6 +1005,81 @@ export const messages = defineMessages({
     id: "app.gateway.serviceAccounts.loadingOne",
     defaultMessage: "Loading service account",
     description: "Status while loading service-account setup metadata.",
+  },
+  provisioningProgressLabel: {
+    id: "app.gateway.provisioningProgress.label",
+    defaultMessage: "Provisioning progress",
+    description:
+      "Accessible label for the progress stepper showing provisioning steps.",
+  },
+  provisioningStepConfiguringIdentityProvider: {
+    id: "app.gateway.provisioningProgress.step.identityProvider",
+    defaultMessage: "Configuring identity provider",
+    description: "Label for the identity provider provisioning step.",
+  },
+  provisioningStepDeployingGateway: {
+    id: "app.gateway.provisioningProgress.step.deploy",
+    defaultMessage: "Deploying gateway",
+    description: "Label for the gateway deployment provisioning step.",
+  },
+  provisioningStepPreparingEnvironment: {
+    id: "app.gateway.provisioningProgress.step.environment",
+    defaultMessage: "Preparing environment",
+    description: "Label for the environment preparation provisioning step.",
+  },
+  provisioningStepProvisioningDatabase: {
+    id: "app.gateway.provisioningProgress.step.database",
+    defaultMessage: "Provisioning database",
+    description: "Label for the database provisioning step.",
+  },
+  provisioningStepVerifyingHealth: {
+    id: "app.gateway.provisioningProgress.step.health",
+    defaultMessage: "Verifying gateway health",
+    description: "Label for the gateway health verification provisioning step.",
+  },
+  provisioningStepProvisioned: {
+    id: "app.gateway.provisioningProgress.step.provisioned",
+    defaultMessage: "Provisioned",
+    description: "Label for the final provisioning step indicating completion.",
+  },
+  provisioningStepEnvironmentReady: {
+    id: "app.gateway.provisioningProgress.step.environmentReady",
+    defaultMessage: "Environment ready",
+    description: "Completed-state label for the environment preparation step.",
+  },
+  provisioningStepDatabaseReady: {
+    id: "app.gateway.provisioningProgress.step.databaseReady",
+    defaultMessage: "Database ready",
+    description: "Completed-state label for the database provisioning step.",
+  },
+  provisioningStepIdentityProviderReady: {
+    id: "app.gateway.provisioningProgress.step.identityProviderReady",
+    defaultMessage: "IdP ready",
+    description:
+      "Completed-state label for the identity provider configuration step.",
+  },
+  provisioningStepGatewayDeployed: {
+    id: "app.gateway.provisioningProgress.step.gatewayDeployed",
+    defaultMessage: "Gateway deployed",
+    description: "Completed-state label for the gateway deployment step.",
+  },
+  provisioningStepHealthVerified: {
+    id: "app.gateway.provisioningProgress.step.healthVerified",
+    defaultMessage: "Health verified",
+    description:
+      "Completed-state label for the gateway health verification step.",
+  },
+  provisioningStepStartingConsole: {
+    id: "app.gateway.provisioningProgress.step.startingConsole",
+    defaultMessage: "Starting console",
+    description:
+      "Active-state label for the console readiness provisioning step.",
+  },
+  provisioningStepConsoleReady: {
+    id: "app.gateway.provisioningProgress.step.consoleReady",
+    defaultMessage: "Console ready",
+    description:
+      "Completed-state label for the console readiness provisioning step.",
   },
   /* eslint-enable sort-keys */
   unavailableGatewayConsole: {

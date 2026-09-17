@@ -16,6 +16,13 @@ import styles from "./gateway-connection-steps.module.css";
 // builder uses -- this keeps the displayed value copy-paste safe and identical
 // to what the copy button emits (no quoting ever needed).
 const disallowed = /[^A-Za-z0-9_./:@%+=,-]+/g;
+const noLabels: Record<string, string> = {};
+const noMarkers: readonly string[] = [];
+const noValues: Record<string, string> = {};
+
+function ignoreFieldChange(): void {
+  return undefined;
+}
 
 export function sanitizeFieldValue(value: string): string {
   return value.replace(disallowed, "");
@@ -105,32 +112,62 @@ function EditableField({
   );
 }
 
+function SelectField({
+  colorClassName,
+  label,
+  onChange,
+  options,
+  value,
+}: {
+  colorClassName: string;
+  label: string;
+  onChange: (value: string) => void;
+  options: readonly string[];
+  value: string;
+}) {
+  return (
+    <select
+      aria-label={label}
+      className={[styles.selectField, colorClassName].filter(Boolean).join(" ")}
+      onChange={(event) => {
+        onChange(event.target.value);
+      }}
+      value={value}
+    >
+      {options.map((opt) => (
+        <option key={opt} value={opt}>
+          {opt}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 /**
- * A copyable command block whose marked value slots are editable in place.
+ * A copyable and highlighted command block. Marked value slots are editable.
  *
- * `templateCommand` carries the edit markers and is highlighted once; `copyText`
- * is the same command with the operator's current values resolved and drives
- * both the copy button and (identically) a whole-block text selection. Editing a
- * field calls `onFieldChange(marker, value)`; a marker used twice in the command
- * (the mirrored provider name) is kept in lockstep because both slots read the
- * same entry in `values`.
+ * `templateCommand` carries optional edit markers and is highlighted once.
+ * `copyText` contains the resolved values and supplies the clipboard text.
+ * A static command only needs `copyAriaLabel` and `copyText`.
  */
-export function EditableCommand({
+export function CommandBlock({
   copyAriaLabel,
   copyText,
-  labels,
-  markers,
-  onFieldChange,
-  templateCommand,
-  values,
+  labels = noLabels,
+  markers = noMarkers,
+  onFieldChange = ignoreFieldChange,
+  selectOptions,
+  templateCommand = copyText,
+  values = noValues,
 }: {
   copyAriaLabel: string;
   copyText: string;
-  labels: Record<string, string>;
-  markers: readonly string[];
-  onFieldChange: (marker: string, value: string) => void;
-  templateCommand: string;
-  values: Record<string, string>;
+  labels?: Record<string, string>;
+  markers?: readonly string[];
+  onFieldChange?: (marker: string, value: string) => void;
+  selectOptions?: Record<string, readonly string[]>;
+  templateCommand?: string;
+  values?: Record<string, string>;
 }) {
   const intl = useIntl();
   const id = useId();
@@ -183,12 +220,32 @@ export function EditableCommand({
         <div className={styles.highlighted}>
           <pre className="shiki">
             <code>
-              {parts.map((part, index) =>
-                part.kind === "text" ? (
-                  <span className={part.className} key={index}>
-                    {part.value}
-                  </span>
-                ) : (
+              {parts.map((part, index) => {
+                if (part.kind === "text") {
+                  return (
+                    <span className={part.className} key={index}>
+                      {part.value}
+                    </span>
+                  );
+                }
+
+                const options = selectOptions?.[part.marker];
+                if (options) {
+                  return (
+                    <SelectField
+                      colorClassName={part.className}
+                      key={index}
+                      label={labels[part.marker] ?? ""}
+                      onChange={(value) => {
+                        onFieldChange(part.marker, value);
+                      }}
+                      options={options}
+                      value={values[part.marker] ?? ""}
+                    />
+                  );
+                }
+
+                return (
                   <EditableField
                     colorClassName={part.className}
                     key={index}
@@ -198,8 +255,8 @@ export function EditableCommand({
                     }}
                     value={values[part.marker] ?? ""}
                   />
-                ),
-              )}
+                );
+              })}
             </code>
           </pre>
         </div>

@@ -2,7 +2,10 @@ package gateways
 
 import (
 	"context"
+	stderrors "errors"
 	"net/http"
+
+	"gorm.io/gorm"
 
 	"github.com/openshift-online/rh-trex-ai/pkg/api"
 	"github.com/openshift-online/rh-trex-ai/pkg/db"
@@ -31,7 +34,14 @@ type GatewayService interface {
 	// the given namespace to an absolute value and returns it (self-heal path).
 	SetActiveSandboxCount(ctx context.Context, namespace string, count int) (int, *errors.ServiceError)
 
+	// SetGatewayVersion sets the last runtime version that the health reconciler
+	// observed. It does not change any other gateway field.
+	SetGatewayVersion(ctx context.Context, id, version string) (string, *errors.ServiceError)
+
 	FindByIDs(ctx context.Context, ids []string) (GatewayList, *errors.ServiceError)
+
+	// CountByPhase returns the number of gateways in each phase.
+	CountByPhase(ctx context.Context) (map[string]int64, *errors.ServiceError)
 
 	OnUpsert(ctx context.Context, id string) error
 	OnDelete(ctx context.Context, id string) error
@@ -111,6 +121,7 @@ func (s *sqlGatewayService) Create(ctx context.Context, gateway *Gateway) (*Gate
 		return nil, errors.GeneralError("gateway placement did not assign database_id")
 	}
 
+	gateway.CaptureTraceContext(ctx)
 	gateway, err := s.gatewayDao.Create(ctx, gateway)
 	if err != nil {
 		return nil, services.HandleCreateError("Gateway", err)
@@ -135,6 +146,7 @@ func (s *sqlGatewayService) Replace(ctx context.Context, gateway *Gateway) (*Gat
 	}
 	defer s.lockFactory.Unlock(ctx, lockOwnerID)
 
+	gateway.CaptureTraceContext(ctx)
 	gateway, err = s.gatewayDao.Replace(ctx, gateway)
 	if err != nil {
 		return nil, services.HandleUpdateError("Gateway", err)
@@ -167,6 +179,17 @@ func (s *sqlGatewayService) SetActiveSandboxCount(ctx context.Context, namespace
 	resulting, err := s.gatewayDao.SetActiveSandboxCount(ctx, namespace, count)
 	if err != nil {
 		return 0, services.HandleUpdateError("Gateway", err)
+	}
+	return resulting, nil
+}
+
+func (s *sqlGatewayService) SetGatewayVersion(ctx context.Context, id, version string) (string, *errors.ServiceError) {
+	resulting, err := s.gatewayDao.SetGatewayVersion(ctx, id, version)
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			return "", services.HandleGetError("Gateway", "id", id, err)
+		}
+		return "", services.HandleUpdateError("Gateway", err)
 	}
 	return resulting, nil
 }
@@ -220,4 +243,12 @@ func (s *sqlGatewayService) All(ctx context.Context) (GatewayList, *errors.Servi
 		return nil, errors.GeneralError("Unable to get all gateways: %s", err)
 	}
 	return gateways, nil
+}
+
+func (s *sqlGatewayService) CountByPhase(ctx context.Context) (map[string]int64, *errors.ServiceError) {
+	counts, err := s.gatewayDao.CountByPhase(ctx)
+	if err != nil {
+		return nil, errors.GeneralError("Unable to count gateways by phase: %s", err)
+	}
+	return counts, nil
 }

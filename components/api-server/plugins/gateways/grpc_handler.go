@@ -3,6 +3,7 @@ package gateways
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/golang/glog"
 	"google.golang.org/grpc"
@@ -10,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "github.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1"
+	"github.com/openshift-online/hypershell/components/api-server/pkg/gatewayhealth"
 	"github.com/openshift-online/rh-trex-ai/pkg/api"
 	pkgserver "github.com/openshift-online/rh-trex-ai/pkg/server"
 	"github.com/openshift-online/rh-trex-ai/pkg/server/grpcutil"
@@ -25,6 +27,18 @@ type gatewayGRPCHandler struct {
 
 func NewGatewayGRPCHandler(svc GatewayService, generic services.GenericService, brokerFunc func() *pkgserver.EventBroker) pb.GatewayServiceServer {
 	return &gatewayGRPCHandler{service: svc, generic: generic, brokerFunc: brokerFunc}
+}
+
+// validateGatewayPhase rejects a phase outside the canonical vocabulary. An
+// absent or empty phase is accepted so the field stays optional.
+func validateGatewayPhase(phase *string) error {
+	if phase == nil || *phase == "" {
+		return nil
+	}
+	if !gatewayhealth.IsValidPhase(*phase) {
+		return status.Errorf(codes.InvalidArgument, "phase %q is not a valid gateway phase; allowed: %v", *phase, gatewayhealth.PhaseStrings())
+	}
+	return nil
 }
 
 func (h *gatewayGRPCHandler) GetGateway(ctx context.Context, req *pb.GetGatewayRequest) (*pb.GetGatewayResponse, error) {
@@ -43,9 +57,6 @@ func (h *gatewayGRPCHandler) CreateGateway(ctx context.Context, req *pb.CreateGa
 	if err := grpcutil.ValidateStringField("name", req.Name, true); err != nil {
 		return nil, err
 	}
-	if err := grpcutil.ValidateStringField("fleet_id", req.FleetId, true); err != nil {
-		return nil, err
-	}
 	if err := grpcutil.ValidateStringField("cluster_id", req.ClusterId, true); err != nil {
 		return nil, err
 	}
@@ -53,6 +64,9 @@ func (h *gatewayGRPCHandler) CreateGateway(ctx context.Context, req *pb.CreateGa
 		return nil, err
 	}
 	if err := grpcutil.ValidateStringField("database_id", req.DatabaseId, false); err != nil {
+		return nil, err
+	}
+	if err := validateGatewayPhase(req.Phase); err != nil {
 		return nil, err
 	}
 	var serverDnsNamesJSON *string
@@ -64,7 +78,6 @@ func (h *gatewayGRPCHandler) CreateGateway(ctx context.Context, req *pb.CreateGa
 
 	gateway := &Gateway{
 		Name:           req.Name,
-		FleetId:        req.FleetId,
 		ClusterId:      req.ClusterId,
 		ReleaseId:      req.ReleaseId,
 		DatabaseId:     req.DatabaseId,
@@ -94,11 +107,6 @@ func (h *gatewayGRPCHandler) UpdateGateway(ctx context.Context, req *pb.UpdateGa
 			return nil, err
 		}
 	}
-	if req.FleetId != nil {
-		if err := grpcutil.ValidateStringField("fleet_id", *req.FleetId, false); err != nil {
-			return nil, err
-		}
-	}
 	if req.ClusterId != nil {
 		if err := grpcutil.ValidateStringField("cluster_id", *req.ClusterId, false); err != nil {
 			return nil, err
@@ -124,13 +132,21 @@ func (h *gatewayGRPCHandler) UpdateGateway(ctx context.Context, req *pb.UpdateGa
 			return nil, err
 		}
 	}
+	if req.ObservedReleaseId != nil {
+		if err := grpcutil.ValidateStringField("observed_release_id", *req.ObservedReleaseId, false); err != nil {
+			return nil, err
+		}
+	}
 	if req.Status != nil {
 		if err := grpcutil.ValidateStringField("status", *req.Status, false); err != nil {
 			return nil, err
 		}
 	}
 	if req.Phase != nil {
-		if err := grpcutil.ValidateStringField("phase", *req.Phase, false); err != nil {
+		// validateGatewayPhase enforces the canonical vocabulary, a strict subset
+		// of the generic non-empty/length check, so no separate ValidateStringField
+		// call is needed here.
+		if err := validateGatewayPhase(req.Phase); err != nil {
 			return nil, err
 		}
 	}
@@ -141,9 +157,6 @@ func (h *gatewayGRPCHandler) UpdateGateway(ctx context.Context, req *pb.UpdateGa
 	}
 	if req.Name != nil {
 		gateway.Name = *req.Name
-	}
-	if req.FleetId != nil {
-		gateway.FleetId = *req.FleetId
 	}
 	if req.ClusterId != nil {
 		gateway.ClusterId = *req.ClusterId
@@ -182,11 +195,35 @@ func (h *gatewayGRPCHandler) UpdateGateway(ctx context.Context, req *pb.UpdateGa
 	if req.ConsoleAddress != nil {
 		gateway.ConsoleAddress = req.ConsoleAddress
 	}
+	// observed_release_id is control-plane-owned: the control plane advances it
+	// (via this whole-row path, like phase/status/route_address) only after a new
+	// revision passes its health gates. It is readOnly to REST clients.
+	if req.ObservedReleaseId != nil {
+		gateway.ObservedReleaseId = req.ObservedReleaseId
+	}
 	if req.Oidc != nil {
 		gateway.Oidc = req.Oidc
 	}
 	if req.Route != nil {
 		gateway.Route = req.Route
+	}
+	if len(req.ProvisioningConditions) > 0 {
+		type conditionJSON struct {
+			Type            string `json:"type"`
+			ConditionStatus string `json:"condition_status"`
+			Message         string `json:"message"`
+		}
+		conditions := make([]conditionJSON, 0, len(req.ProvisioningConditions))
+		for _, c := range req.ProvisioningConditions {
+			conditions = append(conditions, conditionJSON{
+				Type:            c.Type,
+				ConditionStatus: conditionStatusFromProto(c.ConditionStatus),
+				Message:         c.Message,
+			})
+		}
+		data, _ := json.Marshal(conditions)
+		s := string(data)
+		gateway.ProvisioningConditions = &s
 	}
 	// active_sandbox_count is deliberately not settable here: it is
 	// control-plane owned and mutated only via AdjustActiveSandboxCount /
@@ -226,6 +263,23 @@ func (h *gatewayGRPCHandler) SetActiveSandboxCount(ctx context.Context, req *pb.
 	return &pb.SetActiveSandboxCountResponse{ActiveSandboxCount: int32(count)}, nil
 }
 
+// SetGatewayVersion stores only the last runtime version that the health
+// reconciler observed. The dedicated write cannot overwrite unrelated fields.
+func (h *gatewayGRPCHandler) SetGatewayVersion(ctx context.Context, req *pb.SetGatewayVersionRequest) (*pb.SetGatewayVersionResponse, error) {
+	if err := grpcutil.ValidateRequiredID(req.Id); err != nil {
+		return nil, err
+	}
+	if err := grpcutil.ValidateStringField("gateway_version", req.GatewayVersion, true); err != nil {
+		return nil, err
+	}
+
+	version, svcErr := h.service.SetGatewayVersion(ctx, req.Id, req.GatewayVersion)
+	if svcErr != nil {
+		return nil, grpcutil.ServiceErrorToGRPC(svcErr)
+	}
+	return &pb.SetGatewayVersionResponse{GatewayVersion: version}, nil
+}
+
 func (h *gatewayGRPCHandler) DeleteGateway(ctx context.Context, req *pb.DeleteGatewayRequest) (*pb.DeleteGatewayResponse, error) {
 	if err := grpcutil.ValidateRequiredID(req.Id); err != nil {
 		return nil, err
@@ -244,6 +298,22 @@ func (h *gatewayGRPCHandler) ListGateways(ctx context.Context, req *pb.ListGatew
 	listArgs := &services.ListArguments{
 		Page: int(page),
 		Size: int64(size),
+	}
+
+	// A managed-cluster control-plane sets cluster_id to its own identity so it
+	// only ever lists the gateways it is responsible for provisioning. Filtering
+	// server-side keeps foreign gateways off the wire entirely (see WatchGateways,
+	// which applies the same cooperative scoping to the event stream).
+	//
+	// Validate before interpolating into the search DSL: cluster_id is
+	// request-supplied, so an unvalidated value (e.g. one containing a quote)
+	// could break the filter parse or broaden it. This applies the same field
+	// contract the create/update paths enforce on cluster_id.
+	if clusterID := req.GetClusterId(); clusterID != "" {
+		if err := grpcutil.ValidateStringField("cluster_id", clusterID, false); err != nil {
+			return nil, err
+		}
+		listArgs.Search = fmt.Sprintf("cluster_id = '%s'", clusterID)
 	}
 
 	var gateways []Gateway
@@ -268,6 +338,15 @@ func (h *gatewayGRPCHandler) WatchGateways(req *pb.WatchGatewaysRequest, stream 
 	if broker == nil {
 		return status.Error(codes.Unavailable, "event broker not available")
 	}
+
+	// clusterFilter, when set, scopes this stream to a single managed cluster.
+	// The broker fans EVERY gateway out to EVERY subscriber, so without this a
+	// spoke would receive (and could act on) other clusters' gateways. This is
+	// cooperative scoping, not an enforced trust boundary: the server does not yet
+	// authenticate that the caller owns the claimed cluster_id (no per-caller
+	// RBAC), so any control-plane could pass any cluster_id. Enforcement is pending
+	// the managed-cluster caller-identity binding (remote gRPC TLS+OIDC dial).
+	clusterFilter := req.GetClusterId()
 
 	ctx := stream.Context()
 	sub, err := broker.Subscribe(ctx)
@@ -308,13 +387,26 @@ func (h *gatewayGRPCHandler) WatchGateways(req *pb.WatchGatewaysRequest, stream 
 				gateway, svcErr := h.service.GetUnscoped(ctx, evt.SourceID)
 				if svcErr != nil {
 					glog.Warningf("WatchGateways: failed to load soft-deleted gateway %s: %v", evt.SourceID, svcErr)
+					// When a cluster filter is set we cannot attribute an
+					// unloadable delete to a cluster, so we must not leak it to a
+					// scoped subscriber. Skip it; the spoke's namespace GC still
+					// reaps the orphaned namespace.
+					if clusterFilter != "" {
+						continue
+					}
 				} else {
+					if clusterFilter != "" && gateway.ClusterId != clusterFilter {
+						continue
+					}
 					watchEvent.Gateway = gatewayToProto(gateway)
 				}
 			} else {
 				gateway, svcErr := h.service.Get(ctx, evt.SourceID)
 				if svcErr != nil {
 					glog.Warningf("WatchGateways: failed to load gateway %s: %v", evt.SourceID, svcErr)
+					continue
+				}
+				if clusterFilter != "" && gateway.ClusterId != clusterFilter {
 					continue
 				}
 				watchEvent.Gateway = gatewayToProto(gateway)

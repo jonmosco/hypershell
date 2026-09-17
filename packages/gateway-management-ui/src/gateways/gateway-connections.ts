@@ -1,3 +1,5 @@
+import { gatewayCanonicalPhases } from "./gateway-data";
+
 export interface GatewayConnection {
   activeSandboxCount?: number;
   clusterId?: string;
@@ -6,6 +8,7 @@ export interface GatewayConnection {
   createdAt?: string;
   createdBy?: string;
   endpoint?: string;
+  gatewayVersion?: string;
   id: string;
   name: string;
   oidcAudience?: string;
@@ -27,10 +30,8 @@ export interface GatewayConnection {
  * Only When Ready.
  */
 export function isGatewayReadyToConnect(gateway: GatewayConnection): boolean {
-  return (
-    gateway.phase?.trim().toLocaleLowerCase() === "running" &&
-    Boolean(gateway.endpoint)
-  );
+  const phase = gateway.phase?.trim().toLocaleLowerCase();
+  return phase === gatewayCanonicalPhases.running && Boolean(gateway.endpoint);
 }
 
 const safeShellArgument = /^[A-Za-z0-9_./:@%+=,-]+$/;
@@ -77,11 +78,56 @@ export const vertexProviderName = "my-gcp";
 export const installDocsUrl =
   "https://docs.nvidia.com/openshell/about/installation";
 
+const installScriptUrl =
+  "https://raw.githubusercontent.com/openshift-online/hypershell/main/scripts/install-openshell.sh";
+
+/**
+ * Builds an installation command that matches the reconciled gateway version.
+ */
+export function buildOpenShellInstallCommand(
+  gateway: GatewayConnection,
+): string | undefined {
+  const gatewayVersion = gateway.gatewayVersion?.trim();
+  if (!isGatewayReadyToConnect(gateway) || !gatewayVersion) {
+    return undefined;
+  }
+
+  const postfixStart = gatewayVersion.indexOf("-");
+  const versionWithoutPostfix =
+    postfixStart === -1
+      ? gatewayVersion
+      : gatewayVersion.slice(0, postfixStart);
+  if (!versionWithoutPostfix) {
+    return undefined;
+  }
+  const installerVersion = versionWithoutPostfix.startsWith("v")
+    ? versionWithoutPostfix
+    : `v${versionWithoutPostfix}`;
+
+  return [
+    "curl -LsSf \\",
+    `  ${installScriptUrl} \\`,
+    `  | OPENSHELL_VERSION=${shellArgument(installerVersion)} sh`,
+    'export PATH="$HOME/.local/bin:$PATH"',
+  ].join("\n");
+}
+
+export const sandboxConnectDocsUrl =
+  "https://docs.nvidia.com/openshell/sandboxes/manage-sandboxes#connect-to-a-sandbox";
+
 /** Default sandbox name shown in the copyable create-sandbox command. */
 export const sandboxName = "mysand";
 
 /** Claude model the sandbox runs, shared by the inference and sandbox commands. */
 export const claudeModel = "claude-haiku-4-5";
+
+// Sandbox resource defaults -- keep in sync with:
+//   components/cli/cmd/hypershell/get/gateway/cmd.go (sandboxDriverConfig)
+//   specs/web-console/architecture.spec.md § Create a sandbox
+export const sandboxResourceDefaults = {
+  requests: { cpu: "100m", memory: "512Mi" },
+  limits: { cpu: "500m", memory: "512Mi" },
+} as const;
 
 /**
  * Primary "add a provider" command. Pulls credentials from Application Default
@@ -116,29 +162,62 @@ export function buildInferenceSetCommand(
   return `openshell inference set --provider ${providerName} --model ${model}`;
 }
 
+/**
+ * Builds a complete shell script for creating an OpenShell sandbox with resource limits.
+ * Returns a multi-line string containing:
+ * 1. DRIVER_CONFIG variable assignment with JSON resource specification
+ * 2. openshell sandbox create command referencing $DRIVER_CONFIG
+ *
+ * The DRIVER_CONFIG variable is extracted into a shell variable for readability,
+ * avoiding an unwieldy inline JSON argument in the command itself.
+ */
 export function buildSandboxCreateCommand(
   name: string = sandboxName,
   model: string = claudeModel,
 ): string {
-  return [
+  const driverConfig = JSON.stringify({
+    kubernetes: {
+      containers: {
+        agent: {
+          resources: sandboxResourceDefaults,
+        },
+      },
+    },
+  });
+
+  const variable = `DRIVER_CONFIG='${driverConfig}'`;
+
+  const command = [
     "openshell sandbox create",
-    `--name ${name}`,
+    `--name ${shellArgument(name)}`,
+    '--driver-config-json "$DRIVER_CONFIG"',
     "--env=ANTHROPIC_BASE_URL=https://inference.local",
     "--env=ANTHROPIC_API_KEY=unused",
     "--no-auto-providers",
     `-- claude --bare --model ${model}`,
   ].join(" \\\n  ");
+
+  return `${variable}\n\n${command}`;
+}
+
+export const validEditors = ["cursor", "vscode"] as const;
+export const defaultEditor = "cursor";
+
+export function buildSandboxConnectCommand(
+  name: string = sandboxName,
+  editor: string = defaultEditor,
+): string {
+  return [
+    `openshell sandbox connect ${shellArgument(name)}`,
+    `--editor ${shellArgument(editor)}`,
+  ].join(" \\\n  ");
 }
 
 /**
- * One-time setup script that logs in to the gateway, adds the Claude on Vertex AI
- * provider, and selects the model, combined into a single copyable block so
- * operators paste the whole preamble at once instead of stepping through three
- * commands. Returns `undefined` until the gateway is ready to connect, because
- * registration requires a running gateway endpoint; the caller renders a pending
- * state in that case.
+ * Builds the one-time gateway registration and provider setup commands. The
+ * function returns `undefined` until the gateway is ready.
  */
-export function buildSetupScript(
+export function buildOneTimeSetupScript(
   gateway: GatewayConnection,
   overrides: { model?: string; providerName?: string } = {},
 ): string | undefined {
@@ -150,7 +229,7 @@ export function buildSetupScript(
   const { model = claudeModel, providerName = vertexProviderName } = overrides;
 
   return [
-    "# 1. Log in to the gateway",
+    "# 1. Register the gateway",
     gatewayAdd,
     "",
     "# 2. Add the Claude on Vertex AI provider",

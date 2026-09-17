@@ -58,15 +58,17 @@ function gateway(overrides: Partial<Gateway> = {}): Gateway {
     credential_driver: "",
     database_id: "database-1",
     external_dns: "gateway.example.com",
-    fleet_id: "",
+    gateway_version: "",
     href: "/api/hypershell/v1/gateways/gateway-1",
     id: "gateway-1",
     image: "",
     kind: "Gateway",
     name: "Team gateway",
     namespace: "openshell",
+    observed_release_id: "",
     oidc: "",
     phase: "",
+    provisioning_conditions: "",
     release_id: "release-1",
     route: "",
     route_address: "",
@@ -100,12 +102,13 @@ function managedCluster(
   return {
     api_server_url: "https://api.east.example.com",
     created_at: null,
-    fleet_id: "fleet-1",
     href: "/api/hypershell/v1/managed_clusters/cluster-east",
     id: "cluster-east",
     kind: "ManagedCluster",
     kubeconfig_secret: "cluster-east-kubeconfig",
+    last_seen_at: "",
     name: "Cluster East",
+    oidc_subject: "",
     provider: "AWS",
     region: "us-east-1",
     status: "Ready",
@@ -574,6 +577,16 @@ describe("gateway API operations adapter", () => {
     });
   });
 
+  it("maps gateway_version to the reconciled gateway version", async () => {
+    gatewayApi.get.mockResolvedValue(
+      gateway({ gateway_version: " v0.0.109-rh9a8f8 " }),
+    );
+
+    await expect(
+      controlPlane.getGateway("gateway-1", context),
+    ).resolves.toMatchObject({ gatewayVersion: "v0.0.109-rh9a8f8" });
+  });
+
   it("leaves the console URL unavailable when console_address is absent", async () => {
     gatewayApi.get.mockResolvedValue(gateway({ console_address: "" }));
 
@@ -646,7 +659,6 @@ describe("gateway API operations adapter", () => {
       {
         cluster_id: "cluster-east",
         database_id: "",
-        fleet_id: "",
         name: "team-gateway",
         release_id: "",
         route: '{"enabled":true}',

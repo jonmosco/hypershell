@@ -1,3 +1,12 @@
+export type ProvisioningConditionStatus =
+  "Complete" | "Failed" | "InProgress" | "Pending";
+
+export interface ProvisioningCondition {
+  conditionStatus: ProvisioningConditionStatus;
+  message: string;
+  type: string;
+}
+
 export interface GatewayRecord {
   activeSandboxCount?: number;
   clusterId: string;
@@ -6,6 +15,7 @@ export interface GatewayRecord {
   createdBy?: string;
   databaseId: string;
   externalDns?: string;
+  gatewayVersion?: string;
   id: string;
   name: string;
   namespace: string;
@@ -13,6 +23,7 @@ export interface GatewayRecord {
   oidcClientId?: string;
   oidcIssuer?: string;
   phase?: string;
+  provisioningConditions?: readonly ProvisioningCondition[];
   releaseId: string;
   status?: string;
 }

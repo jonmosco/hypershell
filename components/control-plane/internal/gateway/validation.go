@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	toml "github.com/pelletier/go-toml/v2"
 )
 
 var (
@@ -89,6 +91,73 @@ func ValidateGatewayConfig(config GatewayConfig) error {
 	return nil
 }
 
+// RenderedConfigValidationError marks a failure to validate the fully rendered
+// gateway configuration artifact (the generated gateway.toml), as opposed to a
+// failure validating the declared input. The reconciler uses it to surface a
+// specific human-readable status reason and to distinguish this failure from
+// other reconcile errors. See
+// specs/platform/generated-gateway-config-validation.spec.md.
+type RenderedConfigValidationError struct {
+	Err error
+}
+
+func (e *RenderedConfigValidationError) Error() string { return e.Err.Error() }
+
+func (e *RenderedConfigValidationError) Unwrap() error { return e.Err }
+
+// ValidateRenderedGatewayConfig validates the fully rendered gateway
+// configuration artifact the control plane produced, as distinct from the
+// declared input ValidateGatewayConfig checks. Input validation checks the
+// configuration the control plane was given; this checks the artifact the
+// control plane assembled from it and is about to write to the cluster.
+//
+// It confirms the artifact is well-formed (parses as TOML, the format the
+// gateway consumes) and that its control-plane-managed sections are structurally
+// coherent with the declared intent: when OIDC is enabled the rendered artifact
+// must carry the OIDC section with an issuer and must not permit unauthenticated
+// users. See specs/platform/generated-gateway-config-validation.spec.md.
+func ValidateRenderedGatewayConfig(renderedTOML string, config GatewayConfig) error {
+	var tree map[string]any
+	if err := toml.Unmarshal([]byte(renderedTOML), &tree); err != nil {
+		return fmt.Errorf("rendered gateway configuration is not well-formed TOML: %w", err)
+	}
+
+	// When OIDC is enabled the control plane appends an [openshell.gateway.oidc]
+	// section and flips allow_unauthenticated_users to false. Confirm the produced
+	// artifact actually reflects that intent, so a generation defect cannot ship a
+	// gateway that silently permits unauthenticated access.
+	if config.OIDC.Issuer != "" {
+		oidc, ok := nestedTable(tree, "openshell", "gateway", "oidc")
+		if !ok {
+			return fmt.Errorf("OIDC is enabled but the rendered configuration has no [openshell.gateway.oidc] section")
+		}
+		if issuer, _ := oidc["issuer"].(string); issuer == "" {
+			return fmt.Errorf("OIDC is enabled but the rendered [openshell.gateway.oidc] section has no issuer")
+		}
+		if auth, ok := nestedTable(tree, "openshell", "gateway", "auth"); ok {
+			if allow, ok := auth["allow_unauthenticated_users"].(bool); ok && allow {
+				return fmt.Errorf("OIDC is enabled but the rendered configuration still allows unauthenticated users")
+			}
+		}
+	}
+
+	return nil
+}
+
+// nestedTable walks a decoded TOML tree along the given table path, returning the
+// table at that path and whether every segment resolved to a table.
+func nestedTable(tree map[string]any, path ...string) (map[string]any, bool) {
+	current := tree
+	for _, key := range path {
+		next, ok := current[key].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current = next
+	}
+	return current, true
+}
+
 func ValidateCredentialDriverConfig(config *CredentialDriverConfig) error {
 	if config == nil {
 		return nil
@@ -158,6 +227,12 @@ func validateIdentifier(value string) error {
 	return nil
 }
 
+// claimPathRegex matches a JWT claim reference: one or more dot-separated
+// segments of letters, digits, and underscores. It accepts both top-level
+// claims ("roles", "groups") and nested paths ("realm_access.roles",
+// "hypershell.roles") that realms emit for role mapping.
+var claimPathRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$`)
+
 func ValidateOIDCConfig(oidc OIDCConfig) error {
 	if oidc.Issuer == "" {
 		return nil
@@ -165,6 +240,18 @@ func ValidateOIDCConfig(oidc OIDCConfig) error {
 
 	if (oidc.AdminRole != "") != (oidc.UserRole != "") {
 		return fmt.Errorf("both admin_role and user_role must be set, or both must be empty")
+	}
+
+	// Format-validate roles_claim only when it is set. A blank roles_claim is left
+	// to the gateway's own default (groups), so a BYO OIDC config that sets
+	// admin_role/user_role and omits roles_claim keeps delegating to that default
+	// rather than being rejected. Validation runs on the reconcile path
+	// (ReconcileGateway), so hard-failing a pre-existing config here would break
+	// its reconciliation with no migration. A claim the realm never emits still
+	// can't be caught here without the token (P3-1); this only rejects a
+	// syntactically invalid claim path.
+	if oidc.RolesClaim != "" && !claimPathRegex.MatchString(oidc.RolesClaim) {
+		return fmt.Errorf("invalid roles_claim %q: must be a dot-separated JWT claim path (e.g. \"roles\" or \"realm_access.roles\")", oidc.RolesClaim)
 	}
 
 	return nil

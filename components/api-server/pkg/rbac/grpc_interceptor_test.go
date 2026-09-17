@@ -41,12 +41,12 @@ func TestGrpcMethodIsRead(t *testing.T) {
 		method string
 		want   bool
 	}{
-		{"/hypershell.v1.FleetService/GetFleet", true},
-		{"/hypershell.v1.FleetService/ListFleets", true},
-		{"/hypershell.v1.FleetService/WatchFleets", true},
-		{"/hypershell.v1.FleetService/CreateFleet", false},
-		{"/hypershell.v1.FleetService/UpdateFleet", false},
-		{"/hypershell.v1.FleetService/DeleteFleet", false},
+		{"/hypershell.v1.GatewayReleaseService/GetGatewayRelease", true},
+		{"/hypershell.v1.GatewayReleaseService/ListGatewayReleases", true},
+		{"/hypershell.v1.GatewayReleaseService/WatchGatewayReleases", true},
+		{"/hypershell.v1.GatewayReleaseService/CreateGatewayRelease", false},
+		{"/hypershell.v1.GatewayReleaseService/UpdateGatewayRelease", false},
+		{"/hypershell.v1.GatewayReleaseService/DeleteGatewayRelease", false},
 		{"/hypershell.v1.GatewayService/GetGateway", true},
 		{"/hypershell.v1.GatewayService/CreateGateway", false},
 	}
@@ -114,7 +114,7 @@ func TestIsGRPCAuthorized_ViewerCanOnlyRead(t *testing.T) {
 func TestIsGRPCAuthorized_NoBindingsDenied(t *testing.T) {
 	bindings := []BindingSummary{}
 
-	if isGRPCAuthorized("/hypershell.v1.FleetService/GetFleet", bindings) {
+	if isGRPCAuthorized("/hypershell.v1.GatewayService/GetGateway", bindings) {
 		t.Error("empty bindings must be denied")
 	}
 }
@@ -153,6 +153,7 @@ func TestIsServiceAccountOnlyMethod(t *testing.T) {
 	}{
 		{"/hypershell.v1.GatewayService/AdjustActiveSandboxCount", true},
 		{"/hypershell.v1.GatewayService/SetActiveSandboxCount", true},
+		{"/hypershell.v1.GatewayService/SetGatewayVersion", true},
 		{"/hypershell.v1.GatewayService/UpdateGateway", false},
 		{"/hypershell.v1.GatewayService/CreateGateway", false},
 		{"/hypershell.v1.GatewayService/GetGateway", false},
@@ -197,7 +198,7 @@ func TestUnaryInterceptor_SandboxCountRestrictedToServiceAccount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			interceptor := RBACUnaryInterceptor(ownerLookup, prov, nil, AuthzConfig{
+			interceptor := RBACUnaryInterceptor(ownerLookup, prov, nil, nil, AuthzConfig{
 				EnforceRBAC:     true,
 				ServiceAccounts: tt.serviceAccounts,
 			})
@@ -254,7 +255,7 @@ func TestStreamInterceptor_ManagedDatabaseReplayRestrictedToServiceAccount(t *te
 				ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("hypershell-managed-database-replay", "deleted-v1"))
 			}
 			stream := &fakeServerStream{ctx: ctx}
-			interceptor := RBACStreamInterceptor(ownerLookup, provisioner, nil, AuthzConfig{
+			interceptor := RBACStreamInterceptor(ownerLookup, provisioner, nil, nil, AuthzConfig{
 				EnforceRBAC:     true,
 				ServiceAccounts: tt.serviceAccounts,
 			})
@@ -282,10 +283,10 @@ func TestIsGRPCDeleteMethod(t *testing.T) {
 		method string
 		want   bool
 	}{
-		{"/hypershell.v1.FleetService/DeleteFleet", true},
+		{"/hypershell.v1.GatewayReleaseService/DeleteGatewayRelease", true},
 		{"/hypershell.v1.GatewayService/DeleteGateway", true},
-		{"/hypershell.v1.FleetService/GetFleet", false},
-		{"/hypershell.v1.FleetService/CreateFleet", false},
+		{"/hypershell.v1.GatewayService/GetGateway", false},
+		{"/hypershell.v1.GatewayService/CreateGateway", false},
 	}
 
 	for _, tt := range tests {
@@ -355,5 +356,31 @@ func TestIsGRPCAuthorized_PlatformAdminWithCreatorCanCreate(t *testing.T) {
 
 	if !isGRPCAuthorized("/hypershell.v1.GatewayService/CreateGateway", bindings) {
 		t.Error("platform:admin + gateway:creator should be authorized for Create")
+	}
+}
+
+func TestUnaryInterceptor_GatewayVersionRestrictedToServiceAccount(t *testing.T) {
+	const method = "/hypershell.v1.GatewayService/SetGatewayVersion"
+	const serviceAccount = "service-account-hypershell-control-plane"
+	for _, role := range []string{"gateway:owner", "gateway:creator"} {
+		for _, username := range []string{"human-user", serviceAccount} {
+			t.Run(role+"/"+username, func(t *testing.T) {
+				lookup := fakeLookup{bindings: []BindingSummary{{RoleName: role, Scope: "gateway", GatewayID: strPtr("gw-1")}}}
+				interceptor := RBACUnaryInterceptor(lookup, fakeProvisioner{userID: "user-1"}, nil, nil, AuthzConfig{EnforceRBAC: true, ServiceAccounts: []string{serviceAccount}})
+				ctx := auth.SetUsernameContext(context.Background(), username)
+				called := false
+				_, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: method}, func(context.Context, interface{}) (interface{}, error) {
+					called = true
+					return nil, nil
+				})
+				if username == serviceAccount {
+					if !called || err != nil {
+						t.Fatalf("control-plane call: handler=%v, error=%v", called, err)
+					}
+				} else if called || status.Code(err) != codes.PermissionDenied {
+					t.Fatalf("ordinary user reached version writer: handler=%v, code=%v", called, status.Code(err))
+				}
+			})
+		}
 	}
 }

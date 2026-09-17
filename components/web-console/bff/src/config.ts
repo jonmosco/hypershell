@@ -52,11 +52,37 @@ const configSchema = z.object({
     .min(1)
     .default("hypershell-web-console-bff"),
   OTEL_TRACES_SAMPLE_RATIO: z.coerce.number().min(0).max(1).default(1),
+  GITHUB_API_ORIGIN: httpOrigin.default("https://api.github.com"),
+  GITHUB_ORG_GATE: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) =>
+      value === undefined || value === "" ? undefined : value,
+    ),
+  GITHUB_USERNAME_ALLOWLIST: z.string().optional(),
   OIDC_CLIENT_ID: z.string().trim().min(1).optional(),
   OIDC_ISSUER: httpUrl.optional(),
   OIDC_POST_LOGOUT_REDIRECT_URI: httpUrl.optional(),
   OIDC_REDIRECT_URI: httpUrl.optional(),
   PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
+  PROMETHEUS_QUERY_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(120_000)
+    .default(10_000),
+  PROMETHEUS_URL: httpOrigin.default("http://127.0.0.1:9090"),
+  PROMETHEUS_NAMESPACE: z
+    .string()
+    .trim()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/u)
+    .optional(),
+  CLUSTER_PROMETHEUS_URL: httpOrigin.optional(),
+  CLUSTER_PROMETHEUS_TOKEN_FILE: z.string().trim().min(1).optional(),
+  CLUSTER_PROMETHEUS_CA_FILE: z.string().trim().min(1).optional(),
   SESSION_SECRET: z
     .string()
     .regex(/^[0-9a-f]{64}$/iu, "must be a 64-character hex string (32 bytes)")
@@ -85,6 +111,9 @@ export interface TracingConfig {
 export interface ServerConfig {
   apiOrigin: string;
   apiTimeoutMs: number;
+  githubApiOrigin?: string;
+  githubOrgGate?: string;
+  githubUsernameAllowlist?: string;
   host: string;
   logLevel: z.infer<typeof configSchema>["LOG_LEVEL"];
   nodeEnv: z.infer<typeof configSchema>["NODE_ENV"];
@@ -93,6 +122,12 @@ export interface ServerConfig {
   oidcPostLogoutRedirectUri?: string;
   oidcRedirectUri?: string;
   port: number;
+  prometheusQueryTimeoutMs: number;
+  prometheusUrl: string;
+  prometheusNamespace?: string;
+  clusterPrometheusUrl?: string;
+  clusterPrometheusTokenFile?: string;
+  clusterPrometheusCaFile?: string;
   sessionSecret?: Buffer;
   sessionTtlSeconds: number;
   staticRoot: string;
@@ -143,6 +178,16 @@ export function loadConfig(
     );
   }
 
+  if (
+    (result.data.CLUSTER_PROMETHEUS_TOKEN_FILE ||
+      result.data.CLUSTER_PROMETHEUS_CA_FILE) &&
+    !result.data.CLUSTER_PROMETHEUS_URL?.startsWith("https://")
+  ) {
+    throw new Error(
+      "CLUSTER_PROMETHEUS_URL must be HTTPS when metrics credential files are configured",
+    );
+  }
+
   if (result.data.OIDC_ISSUER) {
     const oidcProblems: string[] = [];
     if (!result.data.OIDC_CLIENT_ID) {
@@ -161,6 +206,9 @@ export function loadConfig(
   return {
     apiOrigin: result.data.HYPERSHELL_API_ORIGIN,
     apiTimeoutMs: result.data.HYPERSHELL_API_TIMEOUT_MS,
+    githubApiOrigin: result.data.GITHUB_API_ORIGIN,
+    githubOrgGate: result.data.GITHUB_ORG_GATE,
+    githubUsernameAllowlist: result.data.GITHUB_USERNAME_ALLOWLIST,
     host: result.data.HOST,
     logLevel: result.data.LOG_LEVEL,
     nodeEnv: result.data.NODE_ENV,
@@ -169,6 +217,12 @@ export function loadConfig(
     oidcPostLogoutRedirectUri: result.data.OIDC_POST_LOGOUT_REDIRECT_URI,
     oidcRedirectUri: result.data.OIDC_REDIRECT_URI,
     port: result.data.PORT,
+    prometheusQueryTimeoutMs: result.data.PROMETHEUS_QUERY_TIMEOUT_MS,
+    prometheusUrl: result.data.PROMETHEUS_URL,
+    prometheusNamespace: result.data.PROMETHEUS_NAMESPACE,
+    clusterPrometheusUrl: result.data.CLUSTER_PROMETHEUS_URL,
+    clusterPrometheusTokenFile: result.data.CLUSTER_PROMETHEUS_TOKEN_FILE,
+    clusterPrometheusCaFile: result.data.CLUSTER_PROMETHEUS_CA_FILE,
     sessionSecret: result.data.SESSION_SECRET
       ? Buffer.from(result.data.SESSION_SECRET, "hex")
       : undefined,

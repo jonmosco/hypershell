@@ -15,6 +15,8 @@ export type {
   GatewayPlacement,
   GatewayPlacementOptions,
   GatewayProvisionInput,
+  ProvisioningCondition,
+  ProvisioningConditionStatus,
   GatewayRecord,
   GatewaySortDirection,
   GatewaySortField,
@@ -58,13 +60,19 @@ export {
   type GatewayCreatePageProps,
 } from "./gateways/gateway-create";
 export {
+  aggregateGatewayDisplayStatusCounts,
+  gatewayCanonicalPhaseStrings,
+  gatewayCanonicalPhases,
+  gatewayPhaseCountsToDisplayStatusCounts,
   gatewayListQueryKey,
   gatewayListQueryRoot,
   gatewayPlacementBatchQueryKey,
   gatewayPlacementDetailQueryKey,
   gatewayPlacementQueryKey,
   gatewayQueryKey,
+  resolveGatewayDisplayStatus,
   toGatewayConnection,
+  type GatewayDisplayStatusCounts,
 } from "./gateways/gateway-data";
 export type { GatewayConnection } from "./gateways/gateway-connections";
 export {
@@ -89,3 +97,11 @@ export type {
   ServiceAccountLeaveDecision,
   ServiceAccountLeaveGuard,
 } from "./service-accounts/service-account-create-dialog";
+export {
+  fetchGatewayMetrics,
+  gatewayMetricsQueryKey,
+  gatewayPhases,
+  emptyGatewayPhaseCounts,
+  type GatewayPhaseCounts,
+} from "./metrics/gateway-metrics-data";
+export { GatewayMetricsDashboard } from "./metrics/gateway-metrics-dashboard";

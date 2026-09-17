@@ -19,6 +19,7 @@ node_modules/
 .npm/
 .react-router/
 build/
+!skills/build/
 coverage/
 dist/
 playwright-report/
@@ -30,11 +31,18 @@ perf-results/
 # Agent Package Manager cache
 apm_modules/
 
-# Claude Code working state
+# Agent working state
 .claude/
+.rpi/
 
 # Kind swap tracking
 .kind-swaps
+
+# OpenShift per-namespace swap tracking
+.openshift-swaps/
+
+# Temporary kustomize wrap dirs used by openshift-up
+.openshift-render.*/
 
 # Local tool binaries (built by make kind-prereqs)
 bin/

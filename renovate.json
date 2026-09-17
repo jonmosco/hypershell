@@ -5,39 +5,110 @@
   "minimumReleaseAge": "14 days",
   "internalChecksFilter": "strict",
   "prConcurrentLimit": 6,
+  "extends": ["github>konflux-ci/mintmaker-presets:cve-automerge-critical"],
+  "tekton": {
+    "managerFilePatterns": [
+      "/\\.yaml$/",
+      "/\\.yml$/"
+    ],
+    "includePaths": [".tekton/**"],
+    "automerge": true
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "OpenShell gateway and supervisor images pinned as env var values in deployment manifests",
+      "managerFilePatterns": ["^deploy/base/.*\\.yaml$"],
+      "matchStrings": [
+        "-\\s*name:\\s*GATEWAY(?:_SUPERVISOR)?_IMAGE\\n\\s+value:\\s*(?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-rhaiv\\.(?<build>\\d+)$"
+    }
+  ],
   "packageRules": [
     {
       "description": "Group non-major Go indirect dependencies",
       "matchManagers": ["gomod"],
       "matchDepTypes": ["indirect"],
       "matchUpdateTypes": ["digest", "minor", "patch"],
-      "groupName": "Go indirect dependencies"
+      "groupName": "Go indirect dependencies",
+      "automerge": true
     },
     {
       "description": "Group non-major npm development dependencies",
       "matchManagers": ["npm"],
       "matchDepTypes": ["devDependencies"],
       "matchUpdateTypes": ["digest", "minor", "patch", "pin", "pinDigest"],
-      "groupName": "npm development dependencies"
+      "groupName": "npm development dependencies",
+      "automerge": true
     },
     {
       "description": "Group non-major npm production dependencies",
       "matchManagers": ["npm"],
       "matchDepTypes": ["dependencies", "optionalDependencies"],
       "matchUpdateTypes": ["digest", "minor", "patch", "pin", "pinDigest"],
-      "groupName": "npm production dependencies"
+      "groupName": "npm production dependencies",
+      "automerge": true
     },
     {
       "description": "Group container image updates",
       "matchManagers": ["dockerfile"],
       "matchUpdateTypes": ["digest", "minor", "patch", "pinDigest"],
-      "groupName": "container images"
+      "groupName": "container images",
+      "automerge": true
     },
     {
       "description": "Group GitHub Actions updates",
       "matchManagers": ["github-actions"],
       "matchUpdateTypes": ["digest", "minor", "patch", "pinDigest"],
-      "groupName": "GitHub Actions"
+      "groupName": "GitHub Actions",
+      "automerge": true
+    },
+    {
+      "description": "Group OpenShell gateway and supervisor image updates into a single PR",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": [
+        "quay.io/opendatahub/odh-openshell-gateway",
+        "quay.io/opendatahub/odh-openshell-supervisor"
+      ],
+      "groupName": "OpenShell images"
+    },
+    {
+      "description": "PatternFly family: peer, dev, and web-console pins in one PR",
+      "matchManagers": ["npm"],
+      "matchPackageNames": [
+        "@patternfly/react-core",
+        "@patternfly/react-icons",
+        "@patternfly/react-table",
+        "@patternfly/react-charts",
+        "@patternfly/widgetized-dashboard"
+      ],
+      "groupName": "PatternFly"
+    },
+    {
+      "description": "Packages declared as both peer and dev in workspace UI packages",
+      "matchManagers": ["npm"],
+      "matchFileNames": [
+        "packages/gateway-management-ui/package.json",
+        "packages/operational-dashboard-ui/package.json"
+      ],
+      "matchDepTypes": ["peerDependencies", "devDependencies"],
+      "matchPackageNames": [
+        "@tanstack/react-query",
+        "react",
+        "react-dom",
+        "react-hook-form",
+        "react-intl",
+        "zod",
+        "victory-area",
+        "victory-core",
+        "victory-group",
+        "victory-tooltip",
+        "victory-voronoi-container"
+      ],
+      "groupName": "workspace UI peer providers",
+      "automerge": true
     }
   ]
 }

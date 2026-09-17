@@ -37,28 +37,18 @@ const defaultOAuth2ProxyImage = "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1"
 
 type StaticImageDefaults struct{}
 
-const defaultGatewayImage = "ghcr.io/nvidia/openshell/gateway:0.0.109"
-const defaultSupervisorImage = "ghcr.io/nvidia/openshell/supervisor:0.0.109"
-
 // DefaultGatewayImage resolves the gateway server (and certgen) image used when
-// a Gateway resource does not specify one. Overridable via GATEWAY_IMAGE so
-// clusters whose nodes cannot reach ghcr.io (e.g. IBM ROKS) can point it at an
-// in-cluster registry mirror, mirroring the GATEWAY_SANDBOX_IMAGE override.
+// a Gateway resource does not specify one. Must be set via GATEWAY_IMAGE environment
+// variable; reconciliation will fail if not provided.
 func (StaticImageDefaults) DefaultGatewayImage() string {
-	if v := os.Getenv("GATEWAY_IMAGE"); v != "" {
-		return v
-	}
-	return defaultGatewayImage
+	return os.Getenv("GATEWAY_IMAGE")
 }
 
 // DefaultSupervisorImage resolves the supervisor sidecar image used when a
-// Gateway resource does not specify one. Overridable via GATEWAY_SUPERVISOR_IMAGE
-// for the same ghcr.io-unreachable clusters as DefaultGatewayImage.
+// Gateway resource does not specify one. Must be set via GATEWAY_SUPERVISOR_IMAGE environment
+// variable; reconciliation will fail if not provided.
 func (StaticImageDefaults) DefaultSupervisorImage() string {
-	if v := os.Getenv("GATEWAY_SUPERVISOR_IMAGE"); v != "" {
-		return v
-	}
-	return defaultSupervisorImage
+	return os.Getenv("GATEWAY_SUPERVISOR_IMAGE")
 }
 
 func (StaticImageDefaults) DefaultDatabaseImage() string {
@@ -71,6 +61,20 @@ func (StaticImageDefaults) DefaultDatabaseImage() string {
 type CNPGConfig struct {
 	ClusterName      string
 	ClusterNamespace string
+}
+
+// ExternalDBConfig locates the admin credentials for an external
+// ManagedDatabase. CredentialsNamespace is the value of
+// ManagedDatabase.connection_secret: the NAMESPACE holding the credentials, not
+// a Secret name. It must satisfy the hypershell-managed-db- prefix rule, and
+// the control plane reads exactly one fixed-name Secret
+// (hypershell-managed-db-credentials) inside it.
+//
+// ManagedDatabaseID is carried for diagnostics only: single-shot cleanup logs
+// it so an operator can tie an orphaned role/database back to its registration.
+type ExternalDBConfig struct {
+	CredentialsNamespace string
+	ManagedDatabaseID    string
 }
 
 // DefaultSandboxImage resolves the base image tenant sandbox pods launch from.
@@ -104,7 +108,14 @@ type NamespaceConfig struct {
 }
 
 type GatewayConfig struct {
-	Image            string                  `yaml:"image"`
+	Image string `yaml:"image"`
+	// ReleaseID is the GatewayRelease the Image was resolved from (empty for a
+	// direct-image gateway). It is stamped onto the gateway Deployment as an
+	// annotation at apply time so the health loop can advance observed_release_id
+	// only to the release actually applied to the workload, never to a desired
+	// release the provisioning path has not yet rolled out. See
+	// gateway-release-rollout.spec.md.
+	ReleaseID        string                  `yaml:"releaseID"`
 	SupervisorImage  string                  `yaml:"supervisorImage"`
 	ServerDnsNames   []string                `yaml:"serverDnsNames"`
 	ExternalDns      string                  `yaml:"externalDns"`
@@ -176,13 +187,15 @@ type ReconcileOpts struct {
 	HasCertManager bool
 	HasGatewayAPI  bool
 	HasCNPG        bool
-	// DatabaseProvider is the ManagedDatabase provider ("cnpg" or "deployment").
+	// DatabaseProvider is the ManagedDatabase provider ("cnpg", "deployment", or "external").
 	DatabaseProvider string
 	CNPG             CNPGConfig
 	// DeploymentDBNamespace is the namespace where the Deployment-managed
 	// database lives. Used when DatabaseProvider is "deployment" to copy
 	// credentials into the tenant namespace.
 	DeploymentDBNamespace string
+	// ExternalDB carries the admin Secret reference for the external provider.
+	ExternalDB            ExternalDBConfig
 	ControlPlaneNamespace string
 	Images                ImageDefaults
 	// SkipNetworkPolicies disables creation of the per-tenant gateway
@@ -213,6 +226,8 @@ type ReconcileOpts struct {
 	UpdateOIDC func(ctx context.Context, oidcJSON string) error
 	// GatewayName is the user-visible name of the gateway being reconciled.
 	GatewayName string
+	// GatewayClientID is the validated identity recorded during provisioning.
+	GatewayClientID string
 	// KeycloakClient is a Keycloak Admin REST API client for cleanup operations.
 	// Used during gateway deletion to remove the Keycloak OIDC client.
 	KeycloakClient KeycloakClientAPI
@@ -227,7 +242,26 @@ type ReconcileOpts struct {
 	// resources, so an in-flight pass does not recreate them behind a concurrent
 	// health-loop teardown. Nil disables the re-check (the pass proceeds).
 	RouteStillDesired func(ctx context.Context) (bool, error)
+	// ReportProgress is called at provisioning step boundaries to report
+	// condition transitions. Nil means no reporting (progress is silently
+	// skipped).
+	ReportProgress ProgressReporter
+	// RecordOrphan, when set, records a durable, operator-visible signal that a
+	// gateway-owned resource was left unreclaimed during deletion with no
+	// automatic recovery path (e.g. a Keycloak client that could not be deleted
+	// because Keycloak was unavailable). It exists so a best-effort cleanup
+	// failure is never a silent orphan. Nil disables recording (the failure is
+	// only logged, matching legacy behavior). Implementations must not include
+	// secrets in any argument.
+	RecordOrphan OrphanRecorder
 }
+
+// OrphanRecorder records a durable, operator-visible signal that a gateway-owned
+// resource was left behind during deletion with no automatic recovery path.
+// resourceKind and resourceName identify the leaked resource; reason explains
+// why it was not reclaimed. Implementations must be best-effort and must never
+// carry secrets.
+type OrphanRecorder func(ctx context.Context, resourceKind, resourceName, reason string)
 
 // KeycloakClientAPI is the subset of keycloak.Client needed by the gateway package.
 type KeycloakClientAPI interface {

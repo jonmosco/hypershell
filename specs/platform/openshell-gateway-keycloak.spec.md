@@ -30,11 +30,11 @@ Gateway Lifecycle (Gateway ADDED/DELETED events):
 
     Caller (UI, hsctl, CI pipeline, curl)
         |  POST /api/hypershell/v1/gateways
-        |  Body includes: name, fleet_id (OIDC config is NOT part of the create request)
+        |  Body includes: name (OIDC config is NOT part of the create request)
         v
     API Server
         |  1. Authorizes via RBAC (caller must have gateway:creator role)
-        |  2. Persists Gateway with fleet_id (oidc field empty at this point)
+        |  2. Persists Gateway (oidc field empty at this point)
         |  3. Auto-provisions gateway:owner RoleBinding for the creator (same transaction)
         |  4. Emits gRPC watch event
         v
@@ -200,7 +200,9 @@ When the GatewayReconciler receives a Gateway ADDED event, it SHALL create a ded
 
 #### Client ID Format
 
-The Keycloak `clientId` SHALL be `{name}-{id}`, where `{name}` is the user-visible gateway name and `{id}` is the API-server resource ID (KSUID). This prevents name clashes when multiple gateways share the same name across fleets or when a gateway is deleted and recreated with the same name. Example: a gateway named `my-gateway` with ID `2FhMpQzXBz` produces `clientId = "my-gateway-2FhMpQzXBz"`.
+The Keycloak `clientId` SHALL be `{name}-{id}`, where `{name}` is the user-visible gateway name and `{id}` is the API-server resource ID (KSUID). This prevents name clashes when multiple gateways share the same name or when a gateway is deleted and recreated with the same name. Example: a gateway named `my-gateway` with ID `2FhMpQzXBz` produces `clientId = "my-gateway-2FhMpQzXBz"`.
+
+For reconciliation of an existing gateway, persisted OIDC `client_id` and `audience` values SHALL be used to preserve identity across a gateway rename only when both non-empty values agree and the identity is gateway-owned: either exactly the immutable gateway ID (legacy format) or a control-character-free identifier ending in `-{gateway-id}`. Control characters and foreign or mismatched persisted identities SHALL be rejected before any Keycloak API call. The current `{name}-{id}` format is used only when neither persisted identity value exists. Historical identifiers containing spaces or non-ASCII characters remain valid; whenever an accepted identifier is written to a log or error, it SHALL be quoted so Unicode separators and formatting controls cannot inject log structure.
 
 The client SHALL be created with the following properties:
 
@@ -240,6 +242,31 @@ After creating the client, the creator's `gateway:owner` role is assigned via th
 - THEN it SHALL enable OAuth 2.0 Device Authorization Grant on the existing Keycloak client
 - AND it SHALL preserve all other client attributes and settings
 - AND subsequent reconciliations SHALL NOT update the client when the grant is already enabled
+
+#### Scenario: Existing gateway client is missing
+
+- GIVEN an active gateway's persisted OIDC identity identifies its gateway-owned Keycloak client
+- AND that desired client is missing from Keycloak
+- WHEN the GatewayReconciler performs lightweight existing-client reconciliation
+- THEN it SHALL set Gateway `status` to the fixed value `Keycloak client is missing`
+- AND it SHALL leave Gateway `phase` unchanged
+- AND it SHALL NOT run Kubernetes provisioning or partially recreate the Keycloak client, because doing so would omit its RoleBinding and console mappings
+- AND it SHALL retry the lightweight reconciliation without transforming it into a full gateway reconciliation
+- AND if startup or reconnect recovery requests a forced full pass during those retries, the forced pass SHALL be retained but deferred until the lightweight reconciliation succeeds
+- AND healthy workload or route observations SHALL NOT replace the missing-client status with `Healthy`
+- AND after the complete desired client becomes available and lightweight reconciliation succeeds, the reconciler SHALL clear the marker without changing the workload phase so the health reconciler resumes ownership of status
+
+#### Scenario: Existing gateway client identity is invalid
+
+- GIVEN an active gateway has malformed OIDC configuration, conflicting `client_id` and `audience`, a foreign persisted identity, a prohibited control character, or another invalid required identity input
+- WHEN the GatewayReconciler performs lightweight existing-client reconciliation
+- THEN it SHALL set Gateway `status` to the fixed value `Keycloak client configuration is invalid`
+- AND it SHALL leave Gateway `phase` unchanged
+- AND it SHALL NOT call Keycloak or run Kubernetes provisioning
+- AND after successfully recording the fixed status it SHALL treat validation as terminal and SHALL NOT retry unchanged invalid desired state
+- AND if recording the status fails, it SHALL retry only the status-only lightweight path with the original gated payload
+- AND healthy workload or route observations SHALL NOT replace the invalid-configuration status with `Healthy`
+- AND after corrected identity configuration reconciles successfully, the reconciler SHALL clear the marker without changing workload phase
 
 #### Scenario: Creator receives admin role on new gateway
 
@@ -519,13 +546,14 @@ OIDC Role Bridge operations (from RoleBinding events) are separate from client p
 The RoleBinding event and the Gateway event are emitted by the API server in the same transaction. Because the control plane processes watch events concurrently, the RoleBindingReconciler MAY attempt to assign a Keycloak client role before the GatewayReconciler has finished provisioning the Keycloak client. The RoleBindingReconciler SHALL handle this race by retrying role assignment with exponential backoff.
 
 The retry policy SHALL be:
-- Maximum attempts: 10
+- Unlimited attempts until assignment succeeds, the RoleBinding is deleted, or the context is cancelled
 - Initial backoff: 2 seconds
 - Backoff multiplier: 2x per attempt
 - Maximum backoff: 30 seconds
-- Context-aware: retries SHALL stop immediately if the context is cancelled
+- Permanent failures (the RoleBinding's Gateway no longer exists) SHALL NOT be retried
+- Transient failures SHALL be retried, including a missing Keycloak client, a client whose `openshell-admin` / `openshell-user` roles are not yet created, and a watch event whose username or role name has not been enriched yet
 
-Each retry attempt SHALL be logged at INFO level with the attempt number, target client, and error. A successful assignment after retry SHALL be logged at INFO level. Exhaustion of all retry attempts SHALL return the last error to the watcher, which logs it at ERROR level.
+Each retry attempt SHALL be logged at WARN level with the delay, target client, and error. A successful assignment after retry SHALL be logged at INFO level. A permanent missing-gateway failure SHALL be logged at ERROR level and SHALL NOT be retried.
 
 #### Scenario: RoleBinding arrives before Keycloak client exists
 
@@ -541,9 +569,16 @@ Each retry attempt SHALL be logged at INFO level with the attempt number, target
 #### Scenario: Keycloak client never provisioned
 
 - GIVEN the GatewayReconciler fails to provision the Keycloak client (e.g., Keycloak is down)
-- WHEN the RoleBindingReconciler exhausts all retry attempts
+- WHEN the RoleBindingReconciler retries role assignment
+- THEN it SHALL keep retrying with capped exponential backoff until the client exists or the RoleBinding is deleted
+- AND it SHALL NOT drop the binding after a fixed attempt budget
+
+#### Scenario: Gateway for the RoleBinding has been deleted
+
+- GIVEN a RoleBinding whose `gateway_id` no longer resolves
+- WHEN the RoleBindingReconciler attempts to assign a Keycloak role
 - THEN it SHALL log the failure at ERROR level
-- AND the role assignment SHALL be retried on the next RoleBinding event for this binding
+- AND it SHALL NOT retry that binding
 
 ---
 
@@ -661,7 +696,7 @@ When a gateway-scoped RoleBinding is deleted (after checking no remaining covera
 | Bulk realm import does not scale | Importing a realm with thousands of clients runs as a single transaction | Use incremental Admin REST API calls for each gateway |
 | Audience resolve mapper leaks audiences | The built-in `oidc-audience-resolve-mapper` adds all clients' IDs to `aud` when `fullScopeAllowed = true` | Omit the audience-resolve mapper from the realm; use per-client audience mappers |
 | User lookup by subject | Keycloak user search uses `username`, which may differ from the OIDC `sub` claim depending on identity provider federation | The RBAC spec auto-provisions Users from `preferred_username`; ensure this matches the Keycloak username |
-| Gateway created with auto-provisioned RoleBinding | Race between Gateway ADDED and RoleBinding ADDED events (both emitted from the same API transaction) | RoleBindingReconciler retries role assignment with exponential backoff until the Keycloak client is provisioned |
+| Gateway created with auto-provisioned RoleBinding | Race between Gateway ADDED and RoleBinding ADDED events (both emitted from the same API transaction) | RoleBindingReconciler retries role assignment with exponential backoff until the Keycloak client is provisioned. A half-provisioned client (client exists, roles not yet created) is retried the same way. |
 | RoleBinding deletion requires coverage check | Removing one binding may leave the user covered by another | Resolve all remaining bindings for the user+gateway before removing the Keycloak role |
 | Gateway deletion cascades role assignments | Deleting a Keycloak client removes all user role assignments for that client | RBAC RoleBindings in HyperShell are also deleted when the gateway is deleted (gateway_id FK) |
 
@@ -674,3 +709,42 @@ When a gateway-scoped RoleBinding is deleted (after checking no remaining covera
 - [Keycloak Protocol Mappers](https://www.keycloak.org/docs/latest/server_admin/#_protocol-mappers) -- audience, sub, and client-role mapper types
 - [PKCE (RFC 7636)](https://datatracker.ietf.org/doc/html/rfc7636) -- S256 challenge method for public clients
 - [Multi-Gateway OIDC Isolation](https://gist.github.com/jhjaggars/e17c2b094008c14682e3b448eca405eb) -- scale testing and isolation verification for per-gateway Keycloak provisioning
+
+### Requirement: Gateway deletion uses the recorded identity
+
+Gateway deletion SHALL use the same validated OIDC client identity as gateway
+reconciliation. A gateway rename SHALL NOT change the client selected for
+removal. Existing records with only an audience SHALL retain that identity.
+Records without either stored identity field SHALL use the existing
+name-and-gateway-ID fallback. Invalid or conflicting stored identities SHALL
+NOT request Keycloak cleanup: deletion SHALL log the resolution failure for
+operator recovery and SHALL continue namespace and database cleanup. A missing
+Keycloak provisioner SHALL NOT block gateway finalization: deletion SHALL log
+the recorded client identity for operator recovery and SHALL continue namespace
+and database cleanup. Re-enabling the provisioner does not replay a completed
+delete; leftover realm clients are removed from that log.
+
+#### Scenario: Delete a renamed gateway
+
+- GIVEN a gateway was created with a stored OIDC client identity
+- AND its display name changed
+- WHEN the gateway is deleted
+- THEN cleanup selects the stored gateway client and its console client
+- AND cleanup does not select clients from the new display name
+
+#### Scenario: Delete after Keycloak is deconfigured
+
+- GIVEN a gateway has a stored OIDC identity
+- AND the control plane Keycloak client is not configured
+- WHEN the gateway is deleted
+- THEN cleanup SHALL NOT request Keycloak
+- AND cleanup SHALL log the recorded client identity for operator recovery
+- AND cleanup SHALL continue remaining gateway resource deletion
+
+#### Scenario: Delete with an invalid stored identity
+
+- GIVEN a gateway has a stored OIDC identity that is invalid or not owned by the gateway
+- WHEN the gateway is deleted
+- THEN cleanup SHALL NOT request Keycloak
+- AND cleanup SHALL log the resolution failure for operator recovery
+- AND cleanup SHALL continue remaining gateway resource deletion

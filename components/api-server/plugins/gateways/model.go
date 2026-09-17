@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	hypershellapi "github.com/openshift-online/hypershell/components/api-server/pkg/api"
 	"github.com/openshift-online/rh-trex-ai/pkg/api"
 	"github.com/segmentio/ksuid"
 	"gorm.io/gorm"
@@ -13,26 +14,29 @@ const gatewayNamespacePrefix = "openshell-"
 
 type Gateway struct {
 	api.Meta
-	Name               string  `json:"name"`
-	FleetId            string  `json:"fleet_id"`
-	ClusterId          string  `json:"cluster_id"`
-	ReleaseId          string  `json:"release_id"`
-	DatabaseId         string  `json:"database_id"`
-	Namespace          string  `json:"namespace"`
-	ExternalDns        *string `json:"external_dns"`
-	TlsMode            *string `json:"tls_mode"`
-	ServiceType        *string `json:"service_type"`
-	Status             *string `json:"status"`
-	Phase              *string `json:"phase"`
-	Image              *string `json:"image"`
-	SupervisorImage    *string `json:"supervisor_image"`
-	ServerDnsNames     *string `json:"server_dns_names" gorm:"type:jsonb"`
-	RouteAddress       *string `json:"route_address"`
-	ConsoleAddress     *string `json:"console_address"`
-	Oidc               *string `json:"oidc" gorm:"type:jsonb"`
-	Route              *string `json:"route" gorm:"type:jsonb"`
-	CredentialDriver   *string `json:"credential_driver" gorm:"type:jsonb"`
-	ActiveSandboxCount *int    `json:"active_sandbox_count"`
+	hypershellapi.TraceMeta
+	Name                   string  `json:"name"`
+	ClusterId              string  `json:"cluster_id"`
+	ReleaseId              string  `json:"release_id"`
+	DatabaseId             string  `json:"database_id"`
+	Namespace              string  `json:"namespace"`
+	ExternalDns            *string `json:"external_dns"`
+	TlsMode                *string `json:"tls_mode"`
+	ServiceType            *string `json:"service_type"`
+	Status                 *string `json:"status"`
+	Phase                  *string `json:"phase"`
+	Image                  *string `json:"image"`
+	SupervisorImage        *string `json:"supervisor_image"`
+	ServerDnsNames         *string `json:"server_dns_names" gorm:"type:jsonb"`
+	RouteAddress           *string `json:"route_address"`
+	ConsoleAddress         *string `json:"console_address"`
+	GatewayVersion         *string `json:"gateway_version"`
+	ObservedReleaseId      *string `json:"observed_release_id"`
+	Oidc                   *string `json:"oidc" gorm:"type:jsonb"`
+	Route                  *string `json:"route" gorm:"type:jsonb"`
+	CredentialDriver       *string `json:"credential_driver" gorm:"type:jsonb"`
+	ActiveSandboxCount     *int    `json:"active_sandbox_count"`
+	ProvisioningConditions *string `json:"provisioning_conditions" gorm:"type:jsonb"`
 }
 
 type GatewayList []*Gateway
@@ -59,7 +63,6 @@ func (d *Gateway) BeforeCreate(tx *gorm.DB) error {
 
 type GatewayPatchRequest struct {
 	Name             *string `json:"name,omitempty"`
-	FleetId          *string `json:"fleet_id,omitempty"`
 	ClusterId        *string `json:"cluster_id,omitempty"`
 	ReleaseId        *string `json:"release_id,omitempty"`
 	DatabaseId       *string `json:"database_id,omitempty"`

@@ -3,13 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   buildGatewayAddCommand,
   buildInferenceSetCommand,
+  buildOneTimeSetupScript,
+  buildOpenShellInstallCommand,
   buildProviderCreateCommand,
+  buildSandboxConnectCommand,
   buildSandboxCreateCommand,
-  buildSetupScript,
   claudeModel,
   gatewayStatusAppearance,
   isGatewayReadyToConnect,
   sandboxName,
+  sandboxResourceDefaults,
   vertexProviderName,
   type GatewayConnection,
 } from "./gateway-connections";
@@ -18,6 +21,7 @@ const gateway: GatewayConnection = {
   clusterName: "Hub cluster",
   consoleUrl: "https://console.example.test",
   endpoint: "https://gateway.example.test:443",
+  gatewayVersion: "0.0.109",
   id: "gateway-1",
   name: "gateway-1",
   oidcAudience: "openshell-cli",
@@ -48,6 +52,44 @@ describe("gateway connections", () => {
     expect(buildGatewayAddCommand(unsafeGateway)).toContain(
       "--name 'gateway $(unsafe)'",
     );
+  });
+
+  it("builds the version-matched OpenShell installation command", () => {
+    expect(buildOpenShellInstallCommand(gateway)).toBe(
+      [
+        "curl -LsSf \\",
+        "  https://raw.githubusercontent.com/openshift-online/hypershell/main/scripts/install-openshell.sh \\",
+        "  | OPENSHELL_VERSION=v0.0.109 sh",
+        'export PATH="$HOME/.local/bin:$PATH"',
+      ].join("\n"),
+    );
+  });
+
+  it("quotes an unsafe gateway version in the installation command", () => {
+    const command = buildOpenShellInstallCommand({
+      ...gateway,
+      gatewayVersion: "0.0.109; unsafe",
+    });
+
+    expect(command).toContain("OPENSHELL_VERSION='v0.0.109; unsafe' sh");
+  });
+
+  it("removes a postfix and does not add a second version prefix", () => {
+    expect(
+      buildOpenShellInstallCommand({
+        ...gateway,
+        gatewayVersion: "v0.0.109-rh9a8f8",
+      }),
+    ).toContain("OPENSHELL_VERSION=v0.0.109 sh");
+  });
+
+  it("removes a postfix before it adds the version prefix", () => {
+    expect(
+      buildOpenShellInstallCommand({
+        ...gateway,
+        gatewayVersion: "0.0.109-rh9a8f8",
+      }),
+    ).toContain("OPENSHELL_VERSION=v0.0.109 sh");
   });
 
   it("omits OIDC flags when OIDC is not configured", () => {
@@ -136,7 +178,7 @@ describe("gateway connections", () => {
   });
 
   it("threads provider and model overrides through the setup script", () => {
-    const script = buildSetupScript(gateway, {
+    const script = buildOneTimeSetupScript(gateway, {
       model: "MODEL",
       providerName: "PROV",
     });
@@ -149,17 +191,22 @@ describe("gateway connections", () => {
   });
 
   it("creates a sandbox that runs claude against the local inference endpoint", () => {
+    const driverConfig =
+      'DRIVER_CONFIG=\'{"kubernetes":{"containers":{"agent":{"resources":{"requests":{"cpu":"100m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}}}}\'';
+
     expect(buildSandboxCreateCommand()).toBe(
-      `openshell sandbox create \\
+      `${driverConfig}\n\nopenshell sandbox create \\
   --name ${sandboxName} \\
+  --driver-config-json "$DRIVER_CONFIG" \\
   --env=ANTHROPIC_BASE_URL=https://inference.local \\
   --env=ANTHROPIC_API_KEY=unused \\
   --no-auto-providers \\
   -- claude --bare --model ${claudeModel}`,
     );
     expect(buildSandboxCreateCommand("demo")).toBe(
-      `openshell sandbox create \\
+      `${driverConfig}\n\nopenshell sandbox create \\
   --name demo \\
+  --driver-config-json "$DRIVER_CONFIG" \\
   --env=ANTHROPIC_BASE_URL=https://inference.local \\
   --env=ANTHROPIC_API_KEY=unused \\
   --no-auto-providers \\
@@ -173,31 +220,77 @@ describe("gateway connections", () => {
     expect(cmd).toContain("-- claude --bare --model claude-opus-5");
   });
 
-  it("combines login, provider, and inference into one setup script when ready", () => {
-    const script = buildSetupScript(gateway);
+  it("quotes sandbox names that contain shell metacharacters", () => {
+    const cmd = buildSandboxCreateCommand("my sandbox");
+    expect(cmd).toContain("--name 'my sandbox'");
+  });
 
-    // The three preamble commands are consolidated into a single copyable block.
-    expect(script).toContain("--oidc-issuer https://issuer.example.test");
+  it("embeds resource defaults from the shared sandboxResourceDefaults constant", () => {
+    const cmd = buildSandboxCreateCommand();
+    expect(cmd).toContain(`"cpu":"${sandboxResourceDefaults.requests.cpu}"`);
+    expect(cmd).toContain(
+      `"memory":"${sandboxResourceDefaults.requests.memory}"`,
+    );
+    expect(cmd).toContain(`"cpu":"${sandboxResourceDefaults.limits.cpu}"`);
+    expect(cmd).toContain(
+      `"memory":"${sandboxResourceDefaults.limits.memory}"`,
+    );
+  });
+
+  it("builds a sandbox connect command with defaults", () => {
+    expect(buildSandboxConnectCommand()).toBe(
+      `openshell sandbox connect ${sandboxName} \\\n  --editor cursor`,
+    );
+  });
+
+  it("substitutes a custom name into the sandbox connect command", () => {
+    expect(buildSandboxConnectCommand("demo")).toBe(
+      "openshell sandbox connect demo \\\n  --editor cursor",
+    );
+  });
+
+  it("substitutes a custom editor into the sandbox connect command", () => {
+    expect(buildSandboxConnectCommand("demo", "vscode")).toBe(
+      "openshell sandbox connect demo \\\n  --editor vscode",
+    );
+  });
+
+  it("quotes shell-unsafe names in the sandbox connect command", () => {
+    expect(buildSandboxConnectCommand("my $(sandbox)")).toBe(
+      `openshell sandbox connect 'my $(sandbox)' \\\n  --editor cursor`,
+    );
+  });
+
+  it("combines gateway registration, provider, and inference commands", () => {
+    const script = buildOneTimeSetupScript(gateway);
+
+    expect(script).toContain(buildGatewayAddCommand(gateway));
     expect(script).toContain(buildProviderCreateCommand());
     expect(script).toContain(buildInferenceSetCommand());
-    // The policy heredoc is gone; the inference-based flow needs no policy file.
     expect(script).not.toContain("cat >");
-    // Ordered login -> provider -> inference so it runs top to bottom.
-    const loginAt = script?.indexOf("openshell gateway add") ?? -1;
+    const gatewayAt = script?.indexOf("openshell gateway add") ?? -1;
     const providerAt = script?.indexOf("openshell provider create") ?? -1;
     const inferenceAt = script?.indexOf("openshell inference set") ?? -1;
-    expect(loginAt).toBeGreaterThanOrEqual(0);
-    expect(loginAt).toBeLessThan(providerAt);
+    expect(gatewayAt).toBeGreaterThanOrEqual(0);
+    expect(gatewayAt).toBeLessThan(providerAt);
     expect(providerAt).toBeLessThan(inferenceAt);
   });
 
-  it("withholds the setup script until the gateway is ready to connect", () => {
-    expect(buildSetupScript({ ...gateway, phase: "Provisioning" })).toBe(
-      undefined,
-    );
-    expect(buildSetupScript({ ...gateway, endpoint: undefined })).toBe(
-      undefined,
-    );
+  it("withholds installation and setup until the gateway is ready", () => {
+    for (const unavailableGateway of [
+      { ...gateway, phase: "Provisioning" },
+      { ...gateway, endpoint: undefined },
+    ]) {
+      expect(buildOpenShellInstallCommand(unavailableGateway)).toBeUndefined();
+      expect(buildOneTimeSetupScript(unavailableGateway)).toBeUndefined();
+    }
+  });
+
+  it("withholds installation until a reconciled version is available", () => {
+    const gatewayWithoutVersion = { ...gateway, gatewayVersion: undefined };
+
+    expect(buildOpenShellInstallCommand(gatewayWithoutVersion)).toBeUndefined();
+    expect(buildOneTimeSetupScript(gatewayWithoutVersion)).toBeDefined();
   });
 
   it.each([

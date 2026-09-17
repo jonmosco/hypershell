@@ -34,6 +34,36 @@ describe("loadConfig", () => {
     ).toThrow(/HYPERSHELL_API_ORIGIN/u);
   });
 
+  it("rejects a Prometheus URL that is not an origin", () => {
+    expect(() =>
+      loadConfig({ PROMETHEUS_URL: "http://127.0.0.1:9090/metrics" }),
+    ).toThrow(/PROMETHEUS_URL/u);
+  });
+
+  it("normalizes the Prometheus origin", () => {
+    const config = loadConfig({
+      PROMETHEUS_URL: "http://127.0.0.1:9090/",
+      STATIC_ROOT: "./public",
+    });
+
+    expect(config.prometheusUrl).toBe("http://127.0.0.1:9090");
+  });
+
+  it("accepts a custom Prometheus query timeout", () => {
+    const config = loadConfig({
+      PROMETHEUS_QUERY_TIMEOUT_MS: "15000",
+      STATIC_ROOT: "./public",
+    });
+
+    expect(config.prometheusQueryTimeoutMs).toBe(15_000);
+  });
+
+  it("defaults the Prometheus query timeout to ten seconds", () => {
+    const config = loadConfig({ STATIC_ROOT: "./public" });
+
+    expect(config.prometheusQueryTimeoutMs).toBe(10_000);
+  });
+
   it("leaves tracing disabled when no collector endpoint is set", () => {
     const config = loadConfig({ STATIC_ROOT: "./public" });
 
@@ -78,6 +108,34 @@ describe("loadConfig", () => {
       }),
     ).toThrow(/OTEL_TRACES_SAMPLE_RATIO/u);
   });
+
+  it("defaults GitHub org-gate settings to unset", () => {
+    const config = loadConfig({ STATIC_ROOT: "./public" });
+
+    expect(config.githubOrgGate).toBeUndefined();
+    expect(config.githubUsernameAllowlist).toBeUndefined();
+    expect(config.githubApiOrigin).toBe("https://api.github.com");
+  });
+
+  it("loads the GitHub org gate and allowlist from the environment", () => {
+    const config = loadConfig({
+      GITHUB_ORG_GATE: "openshift-online",
+      GITHUB_USERNAME_ALLOWLIST: "alice,bob",
+      STATIC_ROOT: "./public",
+    });
+
+    expect(config.githubOrgGate).toBe("openshift-online");
+    expect(config.githubUsernameAllowlist).toBe("alice,bob");
+  });
+
+  it("treats a blank GitHub org gate as unset", () => {
+    const config = loadConfig({
+      GITHUB_ORG_GATE: "  ",
+      STATIC_ROOT: "./public",
+    });
+
+    expect(config.githubOrgGate).toBeUndefined();
+  });
 });
 
 describe("browserRuntimeConfig", () => {
@@ -103,6 +161,7 @@ describe("browserRuntimeConfig", () => {
 
   it("exposes no server-only configuration to the browser", () => {
     const config = loadConfig({
+      GITHUB_ORG_GATE: "openshift-online",
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.example.test:4318",
       SESSION_SECRET: "a".repeat(64),
       STATIC_ROOT: "./public",
@@ -111,6 +170,7 @@ describe("browserRuntimeConfig", () => {
     const serialized = JSON.stringify(browserRuntimeConfig(config));
     expect(serialized).not.toContain("collector.example.test");
     expect(serialized).not.toContain("a".repeat(64));
+    expect(serialized).not.toContain("openshift-online");
     expect(Object.keys(browserRuntimeConfig(config))).toEqual(["tracing"]);
   });
 });

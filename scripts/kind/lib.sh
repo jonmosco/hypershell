@@ -35,7 +35,7 @@ fi
 if [[ "$(basename "${CONTAINER_ENGINE}")" == "podman" ]]; then
   export KIND_EXPERIMENTAL_PROVIDER=podman
 fi
-: "${GATEWAY_IMAGE:=ghcr.io/nvidia/openshell/gateway:0.0.109}"
+: "${GATEWAY_IMAGE:=quay.io/opendatahub/odh-openshell-gateway:v0.0.109-rhaiv.0@sha256:a80b79e514826e8d57ea137749cf18a6e7f3d92e26bfefe005f3a9c4a55b8bdd}"
 : "${KEYCLOAK_HOSTNAME:=keycloak.hypershell.localhost}"
 : "${KEYCLOAK_OIDC_ISSUER:=https://${KEYCLOAK_HOSTNAME}/realms/hypershell}"
 : "${KEYCLOAK_OIDC_CLIENT_ID:=hypershell-frontend}"
@@ -43,6 +43,44 @@ fi
 : "${KIND_DNS_PORT:=5553}"
 : "${CPK_LOG:=/tmp/cloud-provider-kind.log}"
 DNS_CONTAINER_NAME="${KIND_CLUSTER_NAME}-dns"
+
+# SKIP_SEED and SEED_STRICT apply to Kind and OpenShift. KIND_* names remain aliases.
+skip_seed() {
+  case "${SKIP_SEED:-${KIND_SKIP_SEED:-}}" in
+    true|TRUE|1|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+seed_strict() {
+  case "${SEED_STRICT:-${KIND_SEED_STRICT:-}}" in
+    true|TRUE|1|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Id of the first HyperShell list item whose name matches. Field order in the
+# list payload is not stable (presenters emit id before name), so callers must
+# not grep "name" then "id" in one object. Empty on missing name or bad JSON.
+json_named_id() {
+  python3 -c 'import json,sys
+name=sys.argv[1]
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(data, dict):
+    items=data.get("items") or []
+elif isinstance(data, list):
+    items=data
+else:
+    items=[]
+for it in items:
+    if isinstance(it, dict) and it.get("name") == name:
+        print(it.get("id") or "")
+        break
+' "$1"
+}
 
 # --- Cluster helpers ---
 
@@ -67,25 +105,116 @@ kube() {
 }
 
 # --- Swap tracking (.kind-swaps) ---
+# Format matches the OpenShift driver's per-namespace ledger
+# (openshift_swap_file in scripts/cluster/lib.sh): one "component<TAB>image"
+# line per swapped component, so both drivers can record and restore the
+# exact working-tree image identity, not just the fact that a swap happened.
+# The web console's hot-reload mode (KIND_HOT_RELOAD=true, the default) has no
+# image of its own -- it redirects the Service to a host-run dev server -- so
+# it is tracked with the sentinel image "hot-reload".
+#
+# Readers also accept a leftover pre-tab line that is just the component name
+# (`^component$`). Those entries cannot restore an image (none was recorded);
+# kind-up warns and leaves the marker so status still reports the component as
+# swapped until the next `swap-component` rewrite.
 
 SWAP_FILE=".kind-swaps"
 
+# _swap_ledger_has / _swap_ledger_delete - match both the current
+# "component<TAB>image" lines and a pre-tab leftover that is only the name.
+_swap_ledger_has() {
+  local component="$1"
+  [[ -f "${SWAP_FILE}" ]] || return 1
+  grep -q "^${component}[[:space:]]" "${SWAP_FILE}" 2>/dev/null \
+    || grep -q "^${component}$" "${SWAP_FILE}" 2>/dev/null
+}
+
+_swap_ledger_delete() {
+  local component="$1"
+  local tmp
+  tmp="$(mktemp)"
+  sed "/^${component}[[:space:]]/d; /^${component}$/d" "${SWAP_FILE}" > "${tmp}"
+  mv "${tmp}" "${SWAP_FILE}"
+}
+
 track_swap() {
   local component="$1"
-  grep -q "^${component}$" "${SWAP_FILE}" 2>/dev/null || echo "${component}" >> "${SWAP_FILE}"
+  local image="$2"
+  touch "${SWAP_FILE}"
+  if _swap_ledger_has "${component}"; then
+    _swap_ledger_delete "${component}"
+  fi
+  printf '%s\t%s\n' "${component}" "${image}" >> "${SWAP_FILE}"
 }
 
 clear_swap() {
   local component="$1"
   if [[ -f "${SWAP_FILE}" ]]; then
-    sed -i.bak "/^${component}$/d" "${SWAP_FILE}" 2>/dev/null
-    rm -f "${SWAP_FILE}.bak"
+    _swap_ledger_delete "${component}"
+    [[ -s "${SWAP_FILE}" ]] || rm -f "${SWAP_FILE}"
   fi
 }
 
 is_swapped() {
   local component="$1"
-  grep -q "^${component}$" "${SWAP_FILE}" 2>/dev/null
+  _swap_ledger_has "${component}"
+}
+
+swap_image() {
+  local component="$1"
+  [[ -f "${SWAP_FILE}" ]] || return 0
+  awk -F '\t' -v c="${component}" '$1 == c { print $2; exit }' "${SWAP_FILE}"
+}
+
+# Deployment/container mapping for the three swappable components, kept local
+# to Kind's swap ledger so restore_swaps_after_reconcile does not need to pull
+# in scripts/cluster/lib.sh's component_spec (which also carries build/push
+# fields Kind's restore path does not need).
+kind_swap_deployment() {
+  case "$1" in
+    api-server) printf 'hypershell-api-server' ;;
+    control-plane) printf 'hypershell-controller' ;;
+    web-console) printf 'hypershell-web-console' ;;
+  esac
+}
+
+kind_swap_containers() {
+  case "$1" in
+    api-server) printf 'api-server migrate' ;;
+    control-plane) printf 'controller' ;;
+    web-console) printf 'web-console' ;;
+  esac
+}
+
+# Mirrors the OpenShift driver's restore_swaps_after_reconcile
+# (scripts/cluster/drivers/openshift.sh): `kind-up` re-applies the full
+# manifest set on every run, which resets any swapped Deployment's image back
+# to the overlay baseline. Call this right after that apply so a swapped
+# component's working-tree image is restored immediately, the same
+# apply-then-restore sequencing OpenShift uses. Hot-reload web console has no
+# image to restore -- its Service/EndpointSlice redirect is handled by the
+# scale-to-zero guard in up.sh -- so it is skipped here.
+restore_swaps_after_reconcile() {
+  local component image deployment containers args c
+  for component in api-server control-plane web-console; do
+    is_swapped "${component}" || continue
+    image="$(swap_image "${component}")"
+    if [[ -z "${image}" ]]; then
+      warn "Swap ledger for ${component} has no image (pre-tab .kind-swaps format). Re-run the ${component} swap to record the working-tree image; this kind-up cannot restore it."
+      continue
+    fi
+    if [[ "${component}" == "web-console" && "${image}" == "hot-reload" ]]; then
+      continue
+    fi
+    info "Preserving ${component} working-tree image ${image}"
+    deployment="$(kind_swap_deployment "${component}")"
+    containers="$(kind_swap_containers "${component}")"
+    args=()
+    for c in ${containers}; do
+      args+=("${c}=${image}")
+    done
+    kube set image "deployment/${deployment}" "${args[@]}" -n "${KIND_NAMESPACE}"
+  done
 }
 
 # --- DNS (CoreDNS container) ---
@@ -181,8 +310,8 @@ patch_cluster_coredns() {
   local gw_ip="$1"
   local existing
   existing=$(kube get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}' 2>/dev/null || true)
-  if echo "${existing}" | grep -q "hypershell.localhost"; then
-    info "Cluster CoreDNS already patched for hypershell.localhost"
+  if echo "${existing}" | grep -q "${gw_ip} keycloak.hypershell.localhost"; then
+    info "Cluster CoreDNS already points hypershell.localhost at ${gw_ip}"
     return
   fi
   # All *.hypershell.localhost hosts (including keycloak) resolve to the gateway
@@ -192,7 +321,10 @@ patch_cluster_coredns() {
   # OIDC tokens against the canonical issuer (https://keycloak.hypershell.localhost)
   # exactly as the host does, trusting the self-signed CA via the
   # gateway-trusted-ca ConfigMap (SSL_CERT_FILE).
-  info "Patching cluster CoreDNS: *.hypershell.localhost -> ${gw_ip} (gateway LB)..."
+  #
+  # cloud-provider-kind can assign a new LB IP when the cluster or CPK restarts.
+  # Refresh the hosts block when the IP drifts so in-cluster OIDC discovery does
+  # not keep pointing at an unreachable address from a previous gateway.
   local hosts_block
   hosts_block="hypershell.localhost:53 {
     hosts {
@@ -204,8 +336,14 @@ patch_cluster_coredns() {
     }
   }"
   local patched
-  patched="${hosts_block}
+  if echo "${existing}" | grep -q "hypershell.localhost:53"; then
+    warn "Refreshing cluster CoreDNS hypershell.localhost mapping -> ${gw_ip}"
+    patched=$(echo "${existing}" | sed -E "s/([[:space:]]*)[0-9.]+ (keycloak|api|console|health)\\.hypershell\\.localhost/\\1${gw_ip} \\2.hypershell.localhost/g")
+  else
+    info "Patching cluster CoreDNS: *.hypershell.localhost -> ${gw_ip} (gateway LB)..."
+    patched="${hosts_block}
 ${existing}"
+  fi
   kube create configmap coredns -n kube-system \
     --from-literal="Corefile=${patched}" \
     --dry-run=client -o yaml | kube apply -f -
@@ -373,4 +511,98 @@ stop_port_forward() {
       sudo iptables -t nat -X "${IPTABLES_CHAIN}" 2>/dev/null || true
       ;;
   esac
+}
+
+# --- Keycloak seed-user reconciliation ---
+
+_keycloak_admin_api_token() {
+  local token_url token_resp
+  if [[ -n "${KIND_KEYCLOAK_URL:-}" ]]; then
+    token_url="${KIND_KEYCLOAK_URL%/}/realms/master/protocol/openid-connect/token"
+  else
+    token_url="https://${KEYCLOAK_HOSTNAME}/realms/master/protocol/openid-connect/token"
+  fi
+
+  token_resp=$(curl -sSk -m 10 -X POST "${token_url}" \
+    -d "grant_type=password" \
+    -d "client_id=admin-cli" \
+    -d "username=admin" \
+    -d "password=admin" 2>&1 || true)
+  echo "${token_resp}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || true
+}
+
+_keycloak_assign_realm_role() {
+  local admin_token="$1"
+  local username="$2"
+  local role="$3"
+  local base user_uuid role_json role_id role_name code
+
+  if [[ -n "${KIND_KEYCLOAK_URL:-}" ]]; then
+    base="${KIND_KEYCLOAK_URL%/}"
+  else
+    base="https://${KEYCLOAK_HOSTNAME}"
+  fi
+
+  user_uuid=$(curl -sSk -m 10 -H "Authorization: Bearer ${admin_token}" \
+    "${base}/admin/realms/hypershell/users?username=${username}&exact=true" 2>/dev/null \
+    | python3 -c "import json,sys; a=json.load(sys.stdin); print(a[0]['id'] if a else '')" 2>/dev/null || true)
+  if [[ -z "${user_uuid}" ]]; then
+    warn "Keycloak user not found while reconciling roles: ${username}"
+    return 1
+  fi
+
+  role_json=$(curl -sSk -m 10 -H "Authorization: Bearer ${admin_token}" \
+    "${base}/admin/realms/hypershell/roles/$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${role}")" 2>/dev/null || true)
+  role_id=$(echo "${role_json}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+  role_name=$(echo "${role_json}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('name',''))" 2>/dev/null || true)
+  if [[ -z "${role_id}" || -z "${role_name}" ]]; then
+    warn "Keycloak realm role not found while reconciling roles: ${role}"
+    return 1
+  fi
+
+  code=$(curl -sSk -m 10 -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer ${admin_token}" \
+    -H "Content-Type: application/json" \
+    "${base}/admin/realms/hypershell/users/${user_uuid}/role-mappings/realm" \
+    -d "[{\"id\":\"${role_id}\",\"name\":\"${role_name}\"}]" 2>/dev/null || true)
+  if [[ "${code}" != "204" && "${code}" != "200" ]]; then
+    warn "Failed to assign Keycloak realm role ${role} to ${username} (HTTP ${code})"
+    return 1
+  fi
+  return 0
+}
+
+# Aligns live Keycloak users with deploy/base/keycloak/keycloak.yaml. Idempotent.
+reconcile_keycloak_seed_users() {
+  local admin_token=""
+  local -a required_roles=("platform:admin" "gateway:creator" "hypershell-admins" "hypershell-users")
+
+  if [[ -n "${KIND_KEYCLOAK_URL:-}" ]]; then
+    info "Reconciling Keycloak seed users via ${KIND_KEYCLOAK_URL}..."
+  else
+    info "Reconciling Keycloak seed users at https://${KEYCLOAK_HOSTNAME}..."
+  fi
+
+  for _ in $(seq 1 30); do
+    admin_token="$(_keycloak_admin_api_token)"
+    if [[ -n "${admin_token}" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if [[ -z "${admin_token}" ]]; then
+    warn "Could not obtain Keycloak admin API token; skipping seed-user role reconciliation"
+    return 0
+  fi
+
+  local role failed=""
+  for role in "${required_roles[@]}"; do
+    if ! _keycloak_assign_realm_role "${admin_token}" "admin" "${role}"; then
+      failed=true
+    fi
+  done
+
+  if [[ -z "${failed}" ]]; then
+    success "Keycloak admin user reconciled (dashboard requires platform:admin)"
+  fi
 }

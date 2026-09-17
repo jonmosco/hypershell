@@ -3,8 +3,8 @@ package rbac
 import (
 	"context"
 	"strings"
+	"time"
 
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/golang/glog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -14,20 +14,21 @@ import (
 	"github.com/openshift-online/rh-trex-ai/pkg/auth"
 )
 
-func RBACUnaryInterceptor(lookup RoleBindingLookup, provisioner UserProvisioner, syncer JWTRoleSyncer, config AuthzConfig) grpc.UnaryServerInterceptor {
+func RBACUnaryInterceptor(lookup RoleBindingLookup, provisioner UserProvisioner, syncer JWTRoleSyncer, activityRecorder DailyActivityRecorder, config AuthzConfig) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 		ctx = provisionUserForGRPC(ctx, provisioner, syncer)
 
+		username := auth.GetUsernameFromContext(ctx)
 		if !config.EnforceRBAC {
+			recordAuthorizedDailyActivityGRPC(ctx, username, config.ServiceAccounts, activityRecorder)
 			return handler(ctx, req)
 		}
 
-		username := auth.GetUsernameFromContext(ctx)
 		if isServiceAccount(username, config.ServiceAccounts) {
 			return handler(ctx, req)
 		}
 
-		// Control-plane-only mutations (the sandbox-count writes) are restricted to
+		// Control-plane-only mutations (the sandbox-count and runtime-version writes) are restricted to
 		// the service-account allowlist when one is configured. Any principal that
 		// reaches here is not an allowlisted SA, so deny outright rather than fall
 		// through to the coarse role check, which grants gateway:creator/owner every
@@ -54,22 +55,23 @@ func RBACUnaryInterceptor(lookup RoleBindingLookup, provisioner UserProvisioner,
 			return nil, status.Errorf(codes.PermissionDenied, "forbidden")
 		}
 
+		recordAuthorizedDailyActivityGRPC(ctx, username, config.ServiceAccounts, activityRecorder)
 		return handler(ctx, req)
 	}
 }
 
-func RBACStreamInterceptor(lookup RoleBindingLookup, provisioner UserProvisioner, syncer JWTRoleSyncer, config AuthzConfig) grpc.StreamServerInterceptor {
+func RBACStreamInterceptor(lookup RoleBindingLookup, provisioner UserProvisioner, syncer JWTRoleSyncer, activityRecorder DailyActivityRecorder, config AuthzConfig) grpc.StreamServerInterceptor {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ctx := provisionUserForGRPC(ss.Context(), provisioner, syncer)
 		wrapped := &wrappedServerStream{ServerStream: ss, ctx: ctx}
 
+		username := auth.GetUsernameFromContext(ctx)
 		if !config.EnforceRBAC {
+			recordAuthorizedDailyActivityGRPC(ctx, username, config.ServiceAccounts, activityRecorder)
 			return handler(srv, wrapped)
 		}
-
-		username := auth.GetUsernameFromContext(ctx)
 		if isManagedDatabaseTombstoneReplay(ctx, info.FullMethod) {
-			// Historical tombstones are fleet-unscoped control-plane recovery data.
+			// Historical tombstones are control-plane recovery data.
 			// Unlike the ordinary live watch, replay is never available through role
 			// bindings or the no-allowlist fallback.
 			if len(config.ServiceAccounts) == 0 || !isServiceAccount(username, config.ServiceAccounts) {
@@ -105,6 +107,7 @@ func RBACStreamInterceptor(lookup RoleBindingLookup, provisioner UserProvisioner
 			return status.Errorf(codes.PermissionDenied, "forbidden")
 		}
 
+		recordAuthorizedDailyActivityGRPC(ctx, username, config.ServiceAccounts, activityRecorder)
 		return handler(srv, wrapped)
 	}
 }
@@ -158,8 +161,9 @@ func isGRPCAuthorized(fullMethod string, bindings []BindingSummary) bool {
 
 // isServiceAccountOnlyMethod reports whether a method is a control-plane-only
 // mutation that ordinary role bindings must never reach. AdjustActiveSandboxCount
-// and SetActiveSandboxCount write the control-plane-owned active_sandbox_count and
-// are issued solely by the control plane's service account; without this guard
+// and SetActiveSandboxCount write active_sandbox_count. SetGatewayVersion writes
+// the observed runtime version. Only the control plane may write these fields.
+// Without this guard,
 // isGRPCAuthorized would grant them to any gateway:creator / gateway:owner in any
 // namespace. The restriction applies only when a service-account allowlist is
 // configured (see the interceptors).
@@ -169,7 +173,7 @@ func isServiceAccountOnlyMethod(fullMethod string) bool {
 		return false
 	}
 	method := parts[len(parts)-1]
-	return method == "AdjustActiveSandboxCount" || method == "SetActiveSandboxCount"
+	return method == "AdjustActiveSandboxCount" || method == "SetActiveSandboxCount" || method == "SetGatewayVersion"
 }
 
 func isGRPCDeleteMethod(fullMethod string) bool {
@@ -199,57 +203,33 @@ func provisionUserForGRPC(ctx context.Context, provisioner UserProvisioner, sync
 
 	ctx = context.WithValue(ctx, ContextUserIDKey, userID)
 
+	jwtRoles := extractJWTRolesFromContext(ctx)
+	if len(jwtRoles) > 0 {
+		ctx = context.WithValue(ctx, ContextJWTRolesKey, jwtRoles)
+	}
+	// Always sync even when jwtRoles is empty: SyncJWTRoles applies
+	// configured default roles (e.g. gateway:creator) so that users with
+	// no Keycloak realm roles still receive their initial bindings.
 	if syncer != nil {
-		jwtRoles := extractJWTRolesFromContext(ctx)
-		if len(jwtRoles) > 0 {
-			ctx = context.WithValue(ctx, ContextJWTRolesKey, jwtRoles)
-			if syncErr := syncer.SyncJWTRoles(ctx, userID, jwtRoles); syncErr != nil {
-				glog.Warningf("gRPC JWT role sync failed for %q: %v", username, syncErr)
-			}
+		if syncErr := syncer.SyncJWTRoles(ctx, userID, jwtRoles); syncErr != nil {
+			glog.Warningf("gRPC JWT role sync failed for %q: %v", username, syncErr)
 		}
 	}
 
 	return ctx
 }
 
-func extractJWTRolesFromContext(ctx context.Context) []string {
-	token, err := auth.TokenFromContext(ctx)
-	if err != nil {
-		return nil
+func recordAuthorizedDailyActivityGRPC(ctx context.Context, username string, serviceAccounts []string, activityRecorder DailyActivityRecorder) {
+	if activityRecorder == nil || isServiceAccount(username, serviceAccounts) {
+		return
 	}
 
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil
+	userID := GetUserIDFromContext(ctx)
+	if userID == "" {
+		return
 	}
 
-	realmAccess, ok := claims["realm_access"]
-	if !ok {
-		return nil
-	}
-
-	raMap, ok := realmAccess.(map[string]interface{})
-	if !ok {
-		return nil
-	}
-
-	rolesRaw, ok := raMap["roles"]
-	if !ok {
-		return nil
-	}
-
-	rolesSlice, ok := rolesRaw.([]interface{})
-	if !ok {
-		return nil
-	}
-
-	result := make([]string, 0, len(rolesSlice))
-	for _, r := range rolesSlice {
-		if s, ok := r.(string); ok {
-			result = append(result, s)
-		}
-	}
-	return result
+	activityRecorder.RecordDailyActivity(ctx, userID, time.Now().UTC())
 }
 
 type wrappedServerStream struct {
