@@ -31,7 +31,7 @@ Machine-readable index for autonomous reconciliation (`/reconcile` skill).
 | `platform/data-model.spec.md` | platform | Gateway, GatewayNetwork, GatewayRelease, ManagedCluster | API, CP | - |
 | `platform/control-plane.spec.md` | platform | Watcher, Reconciler, gRPC streams | CP | data-model |
 | `platform/openshell-gateway.spec.md` | platform | Gateway, GatewayReconciler, provisioning | CP | data-model, control-plane |
-| `platform/openshell-gateway-database.spec.md` | platform | Mounted admin credential Secret, per-gateway PostgreSQL provisioning, TLS verify-full, cleanup | CP, deploy | openshell-gateway, gateway-deletion-finalization |
+| `platform/openshell-gateway-database.spec.md` | platform | Mounted admin credential Secret, per-gateway PostgreSQL provisioning, admin TLS verify-full, tenant TLS require, cleanup | CP, deploy | openshell-gateway, gateway-deletion-finalization |
 | `platform/openshell-gateway-tls.spec.md` | platform | cert-manager, TLS certificates, SAN management | CP | openshell-gateway |
 | `platform/openshell-gateway-routing.spec.md` | platform | GRPCRoute, BackendTLSPolicy, NetworkPolicy | CP | openshell-gateway, openshell-gateway-tls |
 | `platform/openshell-gateway-oidc.spec.md` | platform | OIDC authentication, gateway.toml injection | CP | openshell-gateway, openshell-gateway-tls |

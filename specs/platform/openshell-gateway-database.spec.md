@@ -40,8 +40,8 @@ PostgreSQL is the only supported database backend for HyperShell gateways.
   reads for gateway databases: the directory the admin Secret is mounted at (default
   `/etc/hypershell/gateway-database`).
 - **`openshell-gateway-db-credentials`** - the Secret in the gateway's tenant
-  namespace that the gateway workload consumes as `--db-url $(OPENSHELL_DB_URL)`,
-  plus the CA bundle it mounts at `/etc/openshell-db/ca.crt`.
+  namespace whose `uri` key the upstream OpenShell Helm chart injects into the
+  gateway workload as `OPENSHELL_DB_URL` (`server.externalDbSecret`).
 
 ---
 
@@ -61,8 +61,11 @@ the control plane is deployed:
    present a certificate whose hostname matches the `host` the control plane
    connects to, issued by a CA whose PEM bundle the operator places in the admin
    Secret. Cloud providers publish their bundles (AWS RDS global bundle, IBM Cloud
-   Databases CA). HyperShell always verifies the server certificate and hostname
-   (`sslmode=verify-full`) and offers no downgrade.
+   Databases CA). The control plane's own admin connection always verifies the
+   server certificate and hostname (`sslmode=verify-full`) and offers no
+   downgrade. The gateway workload's own connection is capped at
+   `sslmode=require` because the Helm chart cannot mount a database CA into the
+   gateway pod (see Requirement: Tenant Credentials Secret).
 4. **An administrative role** on the server with `CREATEDB`, `CREATEROLE` and
    membership in `pg_signal_backend` (to terminate a gateway's sessions before its
    database is dropped). Full superuser is **not** required; the AWS RDS
@@ -108,7 +111,7 @@ PostgreSQL server:
   └── DATABASE gw_<gatewayID>  (owner gw_<gatewayID>; CONNECT revoked from PUBLIC)
 
   └── Secret openshell-gateway-db-credentials (tenant namespace)
-        uri (sslmode=verify-full) + sslrootcert  →  gateway --db-url, /etc/openshell-db/ca.crt
+        uri (sslmode=require)  →  Helm server.externalDbSecret  →  OPENSHELL_DB_URL
 ```
 
 ### DDL execution: in-process, in the control plane
@@ -370,43 +373,53 @@ After per-gateway DDL, the GatewayReconciler SHALL ensure the tenant-namespace S
 | `dbname` | `gw_<gatewayID>` |
 | `user` | `gw_<gatewayID>` |
 | `password` | generated per-gateway password |
-| `sslmode` | `verify-full` (constant) |
-| `sslrootcert` | the PEM CA bundle copied verbatim from the admin `sslrootcert` file |
-| `uri` | `postgresql://gw_<gatewayID>:<password>@<host>:<port>/gw_<gatewayID>?sslmode=verify-full&sslrootcert=/etc/openshell-db/ca.crt` |
+| `sslmode` | `require` (constant) |
+| `uri` | `postgresql://gw_<gatewayID>:<password>@<host>:<port>/gw_<gatewayID>?sslmode=require` |
 
-The gateway Deployment SHALL project the Secret's `sslrootcert` key read-only at
-`/etc/openshell-db/ca.crt` and SHALL pass `uri` to the gateway as `--db-url` (via the
-`OPENSHELL_DB_URL` environment variable, see
-[`openshell-gateway.spec.md`](./openshell-gateway.spec.md)). The `sslrootcert` path
-inside `uri` therefore names the mounted file, so the gateway verifies the server
-certificate and hostname with the same bundle the control plane used.
+The Secret SHALL NOT carry an `sslrootcert` key.
 
-The tenant Secret SHALL carry only the gateway's own role, database and the public
-CA bundle. Admin `user` and `password` SHALL NEVER be written into a tenant
-namespace. The tenant Secret SHALL carry the management label
-`hypershell.redhat.io/managed: "true"` so tenant-namespace cleanup reclaims it.
+The gateway workload is deployed through the upstream OpenShell Helm chart. The
+control plane SHALL point the chart at this Secret with
+`server.externalDbSecret`, and the chart injects the Secret's `uri` key into the
+gateway container as `OPENSHELL_DB_URL` (see
+[`openshell-gateway.spec.md`](./openshell-gateway.spec.md) and
+[`openshell-gateway-helm-adoption.spec.md`](./openshell-gateway-helm-adoption.spec.md)).
 
-The `sslmode` in the tenant Secret and in `uri` SHALL always be `verify-full`. There
-is no configuration, annotation or environment variable that lowers it for the
-gateway connection.
+The chart reads **only** the `uri` key of this Secret and provides no mechanism to
+mount an additional CA file into the gateway pod for the database connection; its
+`caConfigMapName` values cover the OIDC issuer and the Vault credential driver
+only. The gateway connection is therefore capped at `sslmode=require`: the
+transport is encrypted, but the server certificate and hostname are **not**
+verified by the gateway. This is a deliberate, bounded deviation from the admin
+connection, which reads its CA from a file the control plane mounts itself and
+stays `verify-full`. Raising the gateway connection to `verify-full` requires an
+upstream chart mechanism for a database CA volume.
+
+The tenant Secret SHALL carry only the gateway's own role and database. Admin
+`user` and `password` SHALL NEVER be written into a tenant namespace. The tenant
+Secret SHALL carry the management label `hypershell.redhat.io/managed: "true"` so
+tenant-namespace cleanup reclaims it.
+
+The `sslmode` in the tenant Secret and in `uri` SHALL always be `require`. There is
+no configuration, annotation or environment variable that lowers it further, and
+none that raises it while the chart cannot mount a database CA.
 
 #### Scenario: Credentials Secret written
 
 - GIVEN a provisioned role and database for a Gateway
 - WHEN the GatewayReconciler writes the tenant credentials Secret
-- THEN the `uri` SHALL carry `sslmode=verify-full` and
-  `sslrootcert=/etc/openshell-db/ca.crt`
-- AND `sslrootcert` SHALL equal the admin CA bundle byte for byte
+- THEN the `uri` SHALL carry `sslmode=require`
+- AND the Secret SHALL have no `sslrootcert` key
 - AND the Secret SHALL contain no admin `user` or `password`
 
-#### Scenario: Gateway verifies the server with the mounted CA
+#### Scenario: Gateway connects over an encrypted connection
 
-- GIVEN a gateway Deployment rendered for a provisioned Gateway
+- GIVEN a gateway workload deployed by the Helm chart for a provisioned Gateway
 - WHEN the gateway pod starts
-- THEN the container SHALL find the CA bundle at `/etc/openshell-db/ca.crt`
-- AND SHALL connect with `--db-url` set from the Secret's `uri`
-- AND a server certificate not chaining to that bundle, or not matching `host`, SHALL
-  make the connection fail rather than fall back to an unverified connection
+- THEN `OPENSHELL_DB_URL` SHALL be sourced from the Secret's `uri` key
+- AND the connection SHALL negotiate TLS because `sslmode=require`
+- AND a server that refuses TLS SHALL make the connection fail rather than fall
+  back to plaintext
 
 ---
 
@@ -414,25 +427,22 @@ gateway connection.
 
 When the server's CA changes, the operator SHALL update the admin Secret's
 `sslrootcert` to a bundle containing **both** the old and the new CA for the
-transition period, then remove the old CA once every gateway has been re-issued the
-new bundle and the server no longer presents the old chain.
+transition period, then remove the old CA once the server no longer presents the
+old chain.
 
-On every gateway reconcile, the GatewayReconciler SHALL compare the tenant Secret's
-`sslrootcert` with the current admin bundle and rewrite the tenant Secret when they
-differ. The gateway process reads the CA file at connection time; whether a running
-pod picks up the projected update without a restart depends on the gateway image,
-so the operator runbook documents restarting gateway Deployments as the safe step
-after a bundle change. The reconciler SHALL NOT regenerate the password or touch the
-role when only `sslrootcert` changes.
+The control plane re-reads the mounted admin files on every database operation, so
+a rotated bundle takes effect without a controller restart. Because the tenant
+Secret carries no CA bundle, a CA rotation SHALL NOT require rewriting tenant
+Secrets, regenerating passwords or restarting gateway Deployments.
 
 #### Scenario: Admin bundle updated
 
-- GIVEN a running Gateway whose tenant Secret carries the previous CA bundle
+- GIVEN a running control plane provisioning gateway databases
 - AND the admin Secret's `sslrootcert` now contains the old and the new CA
-- WHEN the GatewayReconciler next reconciles the Gateway
-- THEN it SHALL rewrite the tenant Secret's `sslrootcert` to the new bundle
-- AND SHALL leave `password`, `user`, `dbname`, `host` and `port` unchanged
-- AND SHALL NOT alter the role on the server
+- WHEN the GatewayReconciler next performs a database operation
+- THEN it SHALL verify the server against the updated bundle without a restart
+- AND SHALL leave tenant Secrets, passwords and gateway Deployments untouched
+- AND SHALL NOT alter any role on the server
 
 ---
 

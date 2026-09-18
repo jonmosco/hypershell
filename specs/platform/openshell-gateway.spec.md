@@ -15,7 +15,7 @@ This specification covers core provisioning. Domain-specific concerns are define
 | [`openshell-gateway-tls.spec.md`](./openshell-gateway-tls.spec.md) | TLS certificate management via cert-manager, SAN management, cert rotation |
 | [`openshell-gateway-oidc.spec.md`](./openshell-gateway-oidc.spec.md) | OIDC authentication, role validation, gateway.toml injection |
 | [`openshell-gateway-routing.spec.md`](./openshell-gateway-routing.spec.md) | External connectivity: Gateway API (GRPCRoute + BackendTLSPolicy), NetworkPolicy, route discovery |
-| [`openshell-gateway-database.spec.md`](./openshell-gateway-database.spec.md) | Per-gateway PostgreSQL provisioning from the mounted admin credential Secret, TLS `verify-full`, credential security, cleanup |
+| [`openshell-gateway-database.spec.md`](./openshell-gateway-database.spec.md) | Per-gateway PostgreSQL provisioning from the mounted admin credential Secret, admin TLS `verify-full` and tenant TLS `require`, credential security, cleanup |
 | [`openshell-gateway-credentials.spec.md`](./openshell-gateway-credentials.spec.md) | Credential storage driver selection (encrypted DB, Kubernetes Secrets, Vault), RBAC, TOML generation |
 | [`openshell-gateway-keycloak.spec.md`](./openshell-gateway-keycloak.spec.md) | Automated per-gateway Keycloak OIDC client provisioning, RBAC-driven role assignment, visibility scoping |
 | [`openshell-gateway-console.spec.md`](./openshell-gateway-console.spec.md) | Per-gateway Gateway Console (OpenShell dashboard) with an oauth2-proxy sidecar, deployed when the gateway has a route |
@@ -475,14 +475,13 @@ The gateway Deployment SHALL specify:
   - Liveness: `GET /healthz` on `health` port (period 5s, failureThreshold 3)
   - Readiness: `GET /readyz` on `health` port (period 2s, failureThreshold 3)
 - **Env vars:**
-  - `OPENSHELL_DB_URL` from Secret `openshell-gateway-db-credentials` key `uri` (carries `sslmode=verify-full&sslrootcert=/etc/openshell-db/ca.crt`)
+  - `OPENSHELL_DB_URL` from Secret `openshell-gateway-db-credentials` key `uri` (carries `sslmode=require`; the chart cannot mount a database CA, see [`openshell-gateway-database.spec.md`](./openshell-gateway-database.spec.md))
   - `OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY` from Secret `openshell-gateway-credential-kek` key `key-encryption-key`
 - **Volume mounts:**
   - `/etc/openshell` - ConfigMap `openshell-gateway-config` (readOnly)
   - `/etc/openshell-jwt` - Secret `openshell-gateway-jwt-keys` (readOnly)
   - `/etc/openshell-tls/server` - Secret `openshell-server-tls` (readOnly)
   - `/etc/openshell-tls/client-ca` - Secret `openshell-client-tls` (only `ca.crt` key, readOnly)
-  - `/etc/openshell-db` - Secret `openshell-gateway-db-credentials` (only `sslrootcert` key, projected as `ca.crt`, readOnly)
 
 #### Scenario: Deploy gateway to assigned namespace
 
@@ -621,7 +620,7 @@ See [`openshell-gateway-routing.spec.md`](./openshell-gateway-routing.spec.md) f
 
 #### Database Access
 
-Gateway databases are provisioned on the externally provisioned PostgreSQL server whose admin credentials are mounted into the control plane, outside the cluster. Network reachability from the cluster to that server is a platform prerequisite, and the gateway verifies the server certificate with the CA bundle mounted at `/etc/openshell-db/ca.crt`. See [`openshell-gateway-database.spec.md`](./openshell-gateway-database.spec.md).
+Gateway databases are provisioned on the externally provisioned PostgreSQL server whose admin credentials are mounted into the control plane, outside the cluster. Network reachability from the cluster to that server is a platform prerequisite. The control plane's admin connection verifies the server certificate and hostname against the mounted CA bundle; the gateway workload's own connection is encrypted but not certificate-verified (`sslmode=require`), because the Helm chart cannot mount a database CA into the gateway pod. See [`openshell-gateway-database.spec.md`](./openshell-gateway-database.spec.md).
 
 ---
 
@@ -951,7 +950,7 @@ helm template openshell-gateway oci://ghcr.io/nvidia/openshell/helm-chart \
 | `podSecurityContext.fsGroup=null` | On OpenShift only: `applyOpenShiftOverrides()` clears `fsGroup` from the Deployment pod securityContext before apply | `internal/gateway/reconciler.go` |
 | `securityContext.runAsUser=null` | On OpenShift only: `applyOpenShiftOverrides()` clears `runAsUser` from container securityContext | `internal/gateway/reconciler.go` |
 | `server.disableTls=true` | **NOT used.** BackendTLSPolicy re-encrypts traffic from the networking Gateway to the pod, requiring the gateway to serve TLS. TLS remains enabled on all clusters | N/A |
-| `server.externalDbSecret` | PostgreSQL Secret with `uri` and `sslrootcert` keys provisioned by default; the gateway workload receives `OPENSHELL_DB_URL` from the Secret and mounts the CA at `/etc/openshell-db/ca.crt` | `internal/reconciler/gateway_reconciler.go` |
+| `server.externalDbSecret` | `openshell-gateway-db-credentials`, provisioned by the control plane; the chart injects the Secret's `uri` key as `OPENSHELL_DB_URL`. The chart reads no other key and cannot mount a database CA, so the `uri` uses `sslmode=require` | `internal/gateway/database.go`, `internal/helm/values.go` |
 | `workload.kind=deployment` | Always Deployment - PostgreSQL is the sole backend | `internal/reconciler/gateway_reconciler.go` |
 | `server.oidc.*` | `oidc` field on Gateway resource; injected into `gateway.toml` ConfigMap by `ApplyConfigOverrides` | `internal/gateway/manifests.go` |
 | `replicaCount` | HyperShell uses 1 replica (Deployment default) | N/A |
