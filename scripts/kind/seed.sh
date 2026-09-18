@@ -30,34 +30,60 @@ require_cluster
 
 # --- Seed Gateway via REST API ---
 header "Gateway Provisioning"
-API_URL="http://localhost:8000"
-info "Port-forwarding to API server..."
-kube port-forward svc/hypershell-api-server -n "${KIND_NAMESPACE}" 8000:8000 >/dev/null 2>&1 &
-PF_PID=$!
-cleanup_pf() { kill "${PF_PID}" 2>/dev/null || true; wait "${PF_PID}" 2>/dev/null || true; }
+PF_LOG="$(mktemp -t hypershell-kind-seed-pf.XXXXXX)"
+PF_PID=""
+LOCAL_PORT=""
+
+# A random local port avoids colliding with a fixed :8000 that some other tool
+# or long-lived tunnel already holds on this machine. A collision on a fixed
+# port would make kubectl fail to bind; that failure is not merely cosmetic,
+# because it used to be discarded (>/dev/null) and the readiness loop below
+# would then treat a response from that OTHER, unrelated listener as proof the
+# real API server was reachable. Every following request would silently talk
+# to the wrong backend and fail with a misleading 401 (see the port-forward log
+# on failure below).
+start_api_port_forward() {
+  LOCAL_PORT=$(( (RANDOM % 20000) + 20000 ))
+  API_URL="http://localhost:${LOCAL_PORT}"
+  : >"${PF_LOG}"
+  kube port-forward svc/hypershell-api-server -n "${KIND_NAMESPACE}" "${LOCAL_PORT}:8000" >"${PF_LOG}" 2>&1 &
+  PF_PID=$!
+}
+
+cleanup_pf() {
+  kill "${PF_PID}" 2>/dev/null || true
+  wait "${PF_PID}" 2>/dev/null || true
+  rm -f "${PF_LOG}"
+}
 trap cleanup_pf EXIT
 
+info "Port-forwarding to API server..."
+start_api_port_forward
+
 # `port-forward` accepts a local TCP connection before it has confirmed the pod
-# is serving, so a fixed `sleep` races the REST server coming up. Poll until the
-# API answers with *any* HTTP status -- a 401/403 without a token still proves
-# the server responded (curl exits 0). An empty reply / dead forward makes curl
-# exit non-zero (HTTP 000), so tear the forward down and re-establish it before
-# retrying.
+# is serving, so a fixed `sleep` races the REST server coming up. Confirm
+# kubectl's own "Forwarding from" line (proof this process bound the local
+# port) before trusting an HTTP response on it. A dead process (bind failure,
+# broken pipe) is restarted with a fresh random port rather than retried on the
+# same one.
 info "Waiting for API server to answer through the port-forward..."
 api_reachable=""
 for _ in $(seq 1 30); do
-  if curl -s -o /dev/null -m 3 "${API_URL}/api/hypershell/v1/gateways" 2>/dev/null; then
+  if ! kill -0 "${PF_PID}" 2>/dev/null; then
+    start_api_port_forward
+    sleep 1
+    continue
+  fi
+  if grep -q "^Forwarding from" "${PF_LOG}" 2>/dev/null &&
+    curl -s -o /dev/null -m 3 "${API_URL}/api/hypershell/v1/gateways" 2>/dev/null; then
     api_reachable=true
     break
   fi
-  kill "${PF_PID}" 2>/dev/null || true
-  wait "${PF_PID}" 2>/dev/null || true
-  kube port-forward svc/hypershell-api-server -n "${KIND_NAMESPACE}" 8000:8000 >/dev/null 2>&1 &
-  PF_PID=$!
-  sleep 2
+  sleep 1
 done
 if [[ -z "${api_reachable}" ]]; then
   warn "API server did not answer through the port-forward; seeding may fail"
+  warn "port-forward log: $(cat "${PF_LOG}" 2>/dev/null)"
 fi
 
 # Keycloak --import-realm does not update existing users when keycloak.yaml

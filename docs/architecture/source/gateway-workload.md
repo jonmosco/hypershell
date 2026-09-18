@@ -35,7 +35,7 @@ graph TB
     SN -->|gRPC| GW
   end
   DB[(Gateway PostgreSQL server<br/>database + role gw_id)]
-  GW -->|--db-url, sslmode=verify-full<br/>CA at /etc/openshell-db/ca.crt| DB
+  GW -->|--db-url, sslmode=require| DB
   CERT[cert-manager] -.-> TLS
   AGENT[Agent Sandbox controller] -.-> S1
   style NS fill:#f5f8fa

@@ -56,9 +56,12 @@ All containers must set:
 per-gateway databases live on externally provisioned servers outside the cluster, so
 no database container security configuration is needed on the HyperShell side.
 Development and CI stand-in PostgreSQL servers simulate those external servers and
-are not HyperShell components. Connections from the control plane and from gateway
-workloads to the gateway database server always use `sslmode=verify-full` with an
-operator-supplied CA bundle; there is no TLS downgrade setting (see
+are not HyperShell components. The control plane's admin connection to the gateway
+database server always uses `sslmode=verify-full` with an operator-supplied CA
+bundle; there is no TLS downgrade setting for it. Gateway workloads connect to their
+own database with `sslmode=require` instead, because the upstream OpenShell Helm
+chart has no mechanism to mount a CA bundle into the gateway pod for this connection
+(see
 [`openshell-gateway-database.spec.md`](../../platform/openshell-gateway-database.spec.md)).
 
 ### Gateway Access Isolation

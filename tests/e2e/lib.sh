@@ -107,22 +107,24 @@ retry_until() {
   return 1
 }
 
-# Keep this rule consistent with buildOpenShellInstallCommand in
-# packages/gateway-management-ui/src/gateways/gateway-connections.ts.
-# Remove surrounding space and the first "-" suffix. Add a leading "v".
-openshell_installer_version() {
+# openshell_cli_image_tag - normalize a gateway_version string (as the control
+# plane reconciles it from the gateway's health endpoint, e.g.
+# "0.0.116-rhaiv.6") into the image tag used by
+# quay.io/opendatahub/odh-openshell-cli. Trims whitespace and adds a leading
+# "v" when absent; the suffix (e.g. "-rhaiv.6") is kept, not stripped, because
+# it identifies a downstream build that can be ahead of the last tagged
+# upstream OpenShell release and therefore proto-incompatible with it - the
+# only CLI guaranteed to match is the one built from the same tag by the same
+# pipeline as the deployed gateway/supervisor images.
+openshell_cli_image_tag() {
   local raw="$1"
-  # trim leading/trailing whitespace (mirrors the TS .trim())
   raw="${raw#"${raw%%[![:space:]]*}"}"
   raw="${raw%"${raw##*[![:space:]]}"}"
   [[ -z "$raw" ]] && return 1
-  # Strip the first "-" and all following text (v0.0.109-rh9a8f8 -> v0.0.109).
-  local base="${raw%%-*}"
-  [[ -z "$base" ]] && return 1
-  if [[ "$base" == v* ]]; then
-    printf '%s' "$base"
+  if [[ "$raw" == v* ]]; then
+    printf '%s' "$raw"
   else
-    printf 'v%s' "$base"
+    printf 'v%s' "$raw"
   fi
 }
 

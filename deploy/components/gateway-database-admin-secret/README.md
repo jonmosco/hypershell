@@ -57,10 +57,11 @@ GRANT pg_signal_backend TO hypershell_admin;
   The controller re-reads the mounted file for every operation, so no restart
   is needed. Gateway tenant roles have their own passwords and are unaffected.
 - **CA (`sslrootcert`)**: the controller picks up a new bundle the same way.
-  Gateway pods, however, read their copy (`/etc/openshell-db/ca.crt` from
-  `openshell-gateway-db-credentials`) at start-up and need a restart to trust
-  a new CA. Keep the old and new CA certificates together in the bundle until
-  every gateway has restarted, then drop the old one.
+  Gateway pods do not hold a copy: they connect to their own database with
+  `sslmode=require` (not certificate-verified), because the upstream OpenShell
+  Helm chart has no mechanism to mount a CA bundle for this connection. A CA
+  rotation therefore only affects the admin connection and needs no gateway
+  restart.
 
 ## Manual cleanup after a lost delete
 

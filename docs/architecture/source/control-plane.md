@@ -22,7 +22,7 @@ sequenceDiagram
   W->>R: Dispatch ADDED/MODIFIED
   R->>K: Ensure namespace + PKI
   R->>PG: CREATE ROLE + CREATE DATABASE gw_id (verify-full)
-  R->>K: Ensure DB credentials Secret + CA
+  R->>K: Ensure DB credentials Secret (sslmode=require, no CA)
   R->>K: Ensure Deployment + Service + RBAC
   R->>K: Ensure exposure resources
   K-->>R: Observe readiness

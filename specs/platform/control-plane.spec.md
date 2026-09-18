@@ -46,7 +46,7 @@ Gateway reconciliation is defined in detail across dedicated sub-specs:
 | Sub-Spec | Scope |
 |---|---|
 | [`openshell-gateway.spec.md`](./openshell-gateway.spec.md) | Core provisioning: GatewayReconciler, manifest templating, deployment resources, RBAC, OpenShift adjustments |
-| [`openshell-gateway-database.spec.md`](./openshell-gateway-database.spec.md) | Per-gateway PostgreSQL provisioning from the mounted admin credential Secret, TLS `verify-full`, credential security, cleanup |
+| [`openshell-gateway-database.spec.md`](./openshell-gateway-database.spec.md) | Per-gateway PostgreSQL provisioning from the mounted admin credential Secret (admin TLS `verify-full`, gateway `require`), credential security, cleanup |
 | [`openshell-gateway-tls.spec.md`](./openshell-gateway-tls.spec.md) | TLS certificate management via cert-manager, SAN management, cert rotation |
 | [`openshell-gateway-routing.spec.md`](./openshell-gateway-routing.spec.md) | External connectivity: Gateway API (GRPCRoute + BackendTLSPolicy), NetworkPolicy |
 | [`openshell-gateway-oidc.spec.md`](./openshell-gateway-oidc.spec.md) | OIDC authentication, role validation, gateway.toml injection |

@@ -294,19 +294,25 @@ Local-dev lifecycle (`make openshift-up` / `down` / component swaps) is implemen
 ### openshell-gateway-database.spec.md
 
 > Re-baselined 2026-09-16 (branch `external-db-only`): the ManagedDatabase resource, Gateway `database_id`, database placement and the `hypershell-managed-db-*` credentials namespaces were removed. The controller now reads one mounted admin Secret (`hypershell-gateway-database-admin`, `GATEWAY_DATABASE_ADMIN_DIR`) and always connects with `sslmode=verify-full`. Rows D1-D14 below replace the earlier W8 rows; the W8 wave log further down is historical and is left as written.
+>
+> Updated 2026-09-18: upstream's Helm chart adoption (PR #194) left the gateway
+> workload with no mechanism to mount a CA bundle for its database connection
+> (unlike its OIDC and Vault CA support). The tenant/gateway leg was downgraded to
+> `sslmode=require` (encrypted, not certificate-verified); only the admin
+> connection remains `verify-full`. Rows D4-D6 and D10 below reflect this.
 
 | # | Requirement | Status | Gap | Code Location | Wave |
 |---|-------------|--------|-----|---------------|------|
 | D1 | Admin Credential Mount | Present | Files read from `GATEWAY_DATABASE_ADMIN_DIR` on every operation; Secret volume in `deploy/base/controller.yaml` | `gateway/database.go`, `config/config.go` | EXT-DB ✅ |
 | D2 | Startup Precondition | Present | Required files, PEM `sslrootcert`, port range and `sslmode=verify-full` validated; `log.Fatalf` on failure; no connection at startup | `cmd/hypershell-controller/main.go`, `gateway/database.go` | EXT-DB ✅ |
 | D3 | Per-Gateway Database Provisioning | Present | `CREATE ROLE ... LOGIN`, `GRANT gw_<id> TO <admin>`, `CREATE DATABASE ... OWNER`, `REVOKE/GRANT CONNECT`; password reuse + `ALTER ROLE` repair | `gateway/database.go` | EXT-DB ✅ |
-| D4 | Gateway Credentials Secret (uri + sslrootcert) | Present | Tenant Secret carries `sslmode=verify-full`, CA bundle and `uri` with `sslrootcert=/etc/openshell-db/ca.crt`; no admin values | `gateway/database.go` | EXT-DB ✅ |
-| D5 | CA Bundle Rotation | Partial | Tenant `sslrootcert` rewritten on reconcile when the admin bundle changes; gateway pod restart is a documented operator step | `gateway/database.go` | EXT-DB |
-| D6 | Gateway Workload Type (Deployment) | Present | Always Deployment; CA projected at `/etc/openshell-db/ca.crt`, `--db-url $(OPENSHELL_DB_URL)` | `manifests/gateway/deployment.yaml` | EXT-DB ✅ |
+| D4 | Gateway Credentials Secret (uri, sslmode=require) | Present | Tenant Secret carries `sslmode=require` and `uri` with no `sslrootcert`; no admin values. Helm chart's `server.externalDbSecret` reads only the `uri` key | `gateway/database.go` | EXT-DB ✅ |
+| D5 | CA Bundle Rotation | N/A | Superseded: the tenant leg carries no CA to rotate. Admin `sslrootcert` rotation only affects the admin connection, re-read on every operation | `gateway/database.go` | EXT-DB |
+| D6 | Gateway Workload Type (Deployment) | Present | Always Deployment, rendered by the upstream Helm chart; `--db-url $(OPENSHELL_DB_URL)` from the tenant Secret's `uri`, no CA mount | `internal/helm/values.go` | EXT-DB ✅ |
 | D7 | Per-Gateway Cleanup (retry + IncompleteFinalization) | Present | Terminate backends, `DROP DATABASE ... WITH (FORCE)`, `DROP ROLE`; failure returns error and records `PostgreSQLDatabase gw_<id>` orphan Event | `gateway/database.go`, `gateway/reconciler.go` | EXT-DB ✅ |
 | D8 | Gateway Deletion With Active Sandboxes (Advisory) | Present | Count surfaced as a warning; delete never gated on it | `gateway/reconciler.go` | NGC ✅ |
 | D9 | No Credential Rotation | Present | Password reused from the tenant Secret; `ALTER ROLE` only as repair | `gateway/database.go` | EXT-DB ✅ |
-| D10 | Database Credential Security (crypto/rand, redaction, verify-full only) | Present | 32-byte hex password; driver errors wrapped; no weaker `sslmode` accepted anywhere | `gateway/database.go` | EXT-DB ✅ |
+| D10 | Database Credential Security (crypto/rand, redaction) | Present | 32-byte hex password; driver errors wrapped; admin connection accepts only `verify-full`, tenant connection is fixed at `require` (no lower value, no path to `verify-full`) | `gateway/database.go` | EXT-DB ✅ |
 | D11 | No Database Surface in the API and CLI | Present | `plugins/managedDatabases` and its OpenAPI/proto/SDK/CLI/UI surface removed; `database_id` reserved (not renumbered) on `Gateway`/`CreateGatewayRequest`/`UpdateGatewayRequest` and dropped from OpenAPI, both SDKs, the CLI and the web console; migrations `2026091600000002`/`2026091600000003` drop the column and table | `components/api-server/proto/hypershell/v1/gateways.proto`, `plugins/gateways/migration.go` | EXT-DB ✅ |
 | D12 | Development Environments Use the Same Path | Present | `scripts/kind/up.sh` generates the stand-in CA, serves TLS, creates `hypershell-gateway-database-admin` with `verify-full`; OpenShift driver follows | `scripts/kind/up.sh`, `scripts/cluster/drivers/openshift.sh` | EXT-DB |
 
