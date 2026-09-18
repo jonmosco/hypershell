@@ -22,12 +22,18 @@ type ImageDefaults interface {
 const defaultSandboxImage = "ghcr.io/nvidia/openshell-community/sandboxes/base:latest"
 
 // defaultConsoleImage is the OpenShell dashboard image (the per-gateway
-// console). The upstream project publishes it to quay.io, so clusters pull it
-// directly (imagePullPolicy IfNotPresent) rather than building from source.
-// Pinned by digest to the sha-07f1b13 build for reproducibility; bump
-// deliberately when adopting a new dashboard contract. Overridable via
-// HYPERSHELL_CONSOLE_IMAGE (e.g. a platform-registry mirror in production).
-const defaultConsoleImage = "quay.io/gkrumbach07/openshell-dashboard@sha256:cb5e5b18b4cdf62efb1ce33e2ae73ed646d3cdf438966cae3c328f1c04cce0b4"
+// console): github.com/Gkrumbach07/openshell-dashboard, a standalone project
+// that vendors the OpenShell Go SDK directly, not something the OpenShell
+// Helm chart or CLI cover. The upstream project publishes it to quay.io, so
+// clusters pull it directly (imagePullPolicy IfNotPresent) rather than
+// building from source. Pinned by digest to the v0.3.0 release
+// (sha-978bcb5, "adopt the gateway's typed workspace selectors" -- the
+// CreateSandbox workspace_scope requirement OpenShell added; older builds
+// fail every sandbox action with "workspace_scope is required") for
+// reproducibility; bump deliberately when adopting a new dashboard contract.
+// Overridable via HYPERSHELL_CONSOLE_IMAGE (e.g. a platform-registry mirror
+// in production).
+const defaultConsoleImage = "quay.io/gkrumbach07/openshell-dashboard@sha256:c69c1f34c574556684710a7d2d2a3654f164b855efe0d273a098782447068fc5"
 
 // defaultOAuth2ProxyImage is the oauth2-proxy sidecar image. Overridable via
 // HYPERSHELL_OAUTH2_PROXY_IMAGE.
