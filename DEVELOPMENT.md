@@ -98,6 +98,7 @@ reapplies manifests and waits for readiness. Swapped components are preserved.
 | `make kind-env` | Print `export` statements for the current Kind make variables. |
 | `make kind-fix-ports` | Re-establish host port 443 forwarding to the Gateway's ephemeral port. |
 | `make kind-gateway-trust` | Write the cluster CA to `bin/hypershell-ca.crt` and print `export SSL_CERT_FILE=...` for the openshell CLI. Run `eval "$(make kind-gateway-trust)"`. |
+| `make kind-openshell ARGS="-g <name> ..."` | Run the openshell CLI in a container on Kind's own podman network instead of installing it on the host. Needed when the deployed gateway's build has no native CLI release to install (a downstream image tag, e.g. `v0.0.116-rhaiv.6`) - the matching CLI is Linux-only, so this is the way to use it from macOS. `<name>` must already be a registered gateway (`~/.config/openshell/gateways/<name>/`). |
 | `make kind-api-server-up` | Build the API server from the working tree and swap it into the cluster. |
 | `make kind-api-server-down` | Revert the API server to the baseline registry image. |
 | `make kind-control-plane-up` | Build the control plane from the working tree and swap it into the cluster. |

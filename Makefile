@@ -120,6 +120,8 @@ help:
 	@echo "                             FORCE=true: openshift-down skips ownership labels (still refuses reserved names)"
 	@echo "    kind-fix-ports           Re-establish host port forwarding (443 + 8080)"
 	@echo "    kind-gateway-trust       Print SSL_CERT_FILE export so the openshell CLI trusts the dev CA"
+	@echo "    kind-openshell           Run the openshell CLI via Kind's own network (works on macOS with no native CLI build)"
+	@echo "                             ARGS=\"-g dev sandbox create\""
 	@echo "    LOCAL_IMAGES=true        Build baseline images from the working tree (kind-up)"
 	@echo "    BUILD_SOURCE=baseline    With LOCAL_IMAGES=true, build from origin/main"
 	@echo ""
@@ -477,6 +479,10 @@ kind-web-console-down:
 .PHONY: kind-gateway-trust
 kind-gateway-trust:
 	@scripts/kind/gateway-trust.sh
+
+.PHONY: kind-openshell
+kind-openshell:
+	@scripts/kind/openshell.sh $(ARGS)
 
 # ============================================================================
 # OpenShift cluster lifecycle - shell logic lives in scripts/cluster/
