@@ -821,39 +821,94 @@ echo ""
 e2e_area "5. Route Discovery + CLI Registration"
 echo ""
 
-# Read the runtime version and run the installation command shown in the console.
+# _extract_openshell_cli_from_image - pull an image and copy /usr/local/bin/openshell
+# out of it onto PATH. Used both for an explicit E2E_OPENSHELL_CLI_IMAGE override and
+# for the default path below, which resolves an image matching the deployed gateway.
+# A container image's binary is always built for Linux; extracting it and running it
+# directly only works when the host OS is Linux too, whatever the CPU architecture --
+# otherwise it fails with a confusing "exec format error" instead of a clear one.
+_extract_openshell_cli_from_image() {
+  local image="$1"
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    fail_test "${image} is a Linux-only container image; there is no native openshell build for $(uname -s) at this tag. Run this on a Linux host, or build the CLI from source at that exact commit."
+    exit 1
+  fi
+  dim "  Extracting CLI from container image: ${image}"
+  local install_dir="${HOME}/.local/bin"
+  mkdir -p "${install_dir}"
+  local ctr_name="e2e-cli-extract-$$"
+  local ctr_engine
+  ctr_engine="${CONTAINER_ENGINE:-$(command -v podman 2>/dev/null || echo docker)}"
+  show_cmd "${ctr_engine} create ${image}"
+  if ! ${ctr_engine} create --name "${ctr_name}" "${image}" true >/dev/null 2>&1; then
+    fail_test "Failed to create container from ${image}"
+    exit 1
+  fi
+  if ! ${ctr_engine} cp "${ctr_name}:/usr/local/bin/openshell" "${install_dir}/openshell" 2>/dev/null; then
+    ${ctr_engine} rm "${ctr_name}" >/dev/null 2>&1 || true
+    fail_test "Failed to extract openshell binary from ${image}"
+    exit 1
+  fi
+  ${ctr_engine} rm "${ctr_name}" >/dev/null 2>&1 || true
+  chmod 755 "${install_dir}/openshell"
+  export PATH="${install_dir}:${PATH}"
+  hash -r 2>/dev/null || true
+}
+
+# _reconcile_gateway_version_or_empty - poll the API for GW_ID's gateway_version
+# for up to E2E_GATEWAY_VERSION_TIMEOUT seconds. Echoes the raw version string, or
+# nothing on timeout; never fails the test itself, so callers decide whether an
+# empty result is fatal.
+_reconcile_gateway_version_or_empty() {
+  local raw_version="" deadline
+  deadline=$(($(date +%s) + E2E_GATEWAY_VERSION_TIMEOUT))
+  dim "  Waiting for reconciled gateway_version (timeout: ${E2E_GATEWAY_VERSION_TIMEOUT}s)..."
+  while [[ $(date +%s) -lt $deadline ]]; do
+    # Provisioning can outlast the access token; api_curl reads it each call.
+    acquire_oidc_token 2>/dev/null || true
+    raw_version=$(api_curl "${API_HOST}/api/hypershell/v1/gateways/${GW_ID}" 2>/dev/null | \
+      python3 -c "import json,sys; print(json.load(sys.stdin).get('gateway_version') or '')" 2>/dev/null || true)
+    [[ -n "$raw_version" ]] && break
+    sleep 5
+  done
+  printf '%s' "$raw_version"
+}
+
+# Read the runtime version and install a matching CLI.
 install_openshell_cli_from_api() {
   if [[ "${E2E_OPENSHELL_INSTALL}" == "never" ]]; then
     dim "  E2E_OPENSHELL_INSTALL=never; using pre-installed openshell CLI."
     return 0
   fi
+
+  local raw_version=""
+
   if [[ "${E2E_OPENSHELL_INSTALL}" != "always" && -z "${E2E_OPENSHELL_VERSION}" && "${OPENSHELL_PREINSTALLED}" == "1" ]]; then
-    dim "  Using pre-installed openshell CLI (E2E_OPENSHELL_INSTALL=${E2E_OPENSHELL_INSTALL})."
-    return 0
+    # A CLI already on PATH is only trustworthy if it matches the deployed
+    # gateway: the gateway/supervisor images can carry a downstream suffix
+    # (e.g. "v0.0.116-rhaiv.6") that is proto-incompatible with whatever
+    # unrelated openshell build happens to already be installed.
+    raw_version=$(_reconcile_gateway_version_or_empty)
+    local reported
+    reported=$("${OPENSHELL_BIN}" --version 2>&1 || true)
+    local wanted_tag=""
+    if [[ -n "$raw_version" ]]; then
+      wanted_tag=$(openshell_cli_image_tag "$raw_version" || true)
+    fi
+    if [[ -n "$wanted_tag" ]] && openshell_cli_matches_version "$reported" "$wanted_tag"; then
+      pass "Pre-installed openshell CLI matches the gateway (${reported})"
+      return 0
+    fi
+    if [[ -z "$raw_version" ]]; then
+      dim "  Could not confirm the gateway's version; trusting the pre-installed openshell CLI (${reported}) as-is."
+      return 0
+    fi
+    dim "  Pre-installed openshell CLI (${reported}) does not match gateway_version '${raw_version}'; installing a matching CLI instead."
   fi
 
-  # Container image path: extract the CLI binary directly from a container image.
+  # Explicit container image override.
   if [[ -n "${E2E_OPENSHELL_CLI_IMAGE}" ]]; then
-    dim "  Extracting CLI from container image: ${E2E_OPENSHELL_CLI_IMAGE}"
-    local install_dir="${HOME}/.local/bin"
-    mkdir -p "${install_dir}"
-    local ctr_name="e2e-cli-extract-$$"
-    local ctr_engine
-    ctr_engine="${CONTAINER_ENGINE:-$(command -v podman 2>/dev/null || echo docker)}"
-    show_cmd "${ctr_engine} create ${E2E_OPENSHELL_CLI_IMAGE}"
-    if ! ${ctr_engine} create --name "${ctr_name}" "${E2E_OPENSHELL_CLI_IMAGE}" true >/dev/null 2>&1; then
-      fail_test "Failed to create container from ${E2E_OPENSHELL_CLI_IMAGE}"
-      exit 1
-    fi
-    if ! ${ctr_engine} cp "${ctr_name}:/usr/local/bin/openshell" "${install_dir}/openshell" 2>/dev/null; then
-      ${ctr_engine} rm "${ctr_name}" >/dev/null 2>&1 || true
-      fail_test "Failed to extract openshell binary from ${E2E_OPENSHELL_CLI_IMAGE}"
-      exit 1
-    fi
-    ${ctr_engine} rm "${ctr_name}" >/dev/null 2>&1 || true
-    chmod 755 "${install_dir}/openshell"
-    export PATH="${install_dir}:${PATH}"
-    hash -r 2>/dev/null || true
+    _extract_openshell_cli_from_image "${E2E_OPENSHELL_CLI_IMAGE}"
     local reported
     reported=$("${OPENSHELL_BIN}" --version 2>&1 || true)
     dim "  openshell --version: ${reported}"
@@ -861,87 +916,88 @@ install_openshell_cli_from_api() {
     return 0
   fi
 
-  local installer_version
-
   if [[ -n "${E2E_OPENSHELL_VERSION}" ]]; then
-    # Explicit version override - skip API version derivation.
-    installer_version="${E2E_OPENSHELL_VERSION}"
+    # Explicit version override: install a stable public release by tag, the
+    # one case where a plain upstream OpenShell CLI release is what's wanted
+    # (e.g. testing against a specific NVIDIA/OpenShell release directly,
+    # independent of whatever the deployed gateway happens to run).
+    local installer_version="${E2E_OPENSHELL_VERSION}"
     dim "  Using E2E_OPENSHELL_VERSION override: ${installer_version}"
-  else
-    # The control plane reconciles gateway_version from the gateway's health
-    # endpoint after the pod is Running; poll for a bounded period.
-    local raw_version="" deadline
-    deadline=$(($(date +%s) + E2E_GATEWAY_VERSION_TIMEOUT))
-    dim "  Waiting for reconciled gateway_version (timeout: ${E2E_GATEWAY_VERSION_TIMEOUT}s)..."
-    while [[ $(date +%s) -lt $deadline ]]; do
-      # Provisioning can outlast the access token; api_curl reads it each call.
-      acquire_oidc_token 2>/dev/null || true
-      raw_version=$(api_curl "${API_HOST}/api/hypershell/v1/gateways/${GW_ID}" 2>/dev/null | \
-        python3 -c "import json,sys; print(json.load(sys.stdin).get('gateway_version') or '')" 2>/dev/null || true)
-      [[ -n "$raw_version" ]] && break
-      sleep 5
-    done
-    if [[ -z "$raw_version" ]]; then
-      fail_test "API never reported gateway_version for ${GW_ID} within ${E2E_GATEWAY_VERSION_TIMEOUT}s"
-      exit 1
-    fi
-    pass "Reconciled gateway_version: ${raw_version}"
 
-    if ! installer_version=$(openshell_installer_version "$raw_version"); then
-      fail_test "Could not derive an installer version from gateway_version='${raw_version}'"
+    local target
+    case "$(uname -s)/$(uname -m)" in
+      Linux/x86_64)            target=x86_64-unknown-linux-musl ;;
+      Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-musl ;;
+      Darwin/arm64)            target=aarch64-apple-darwin ;;
+      *) fail_test "Unsupported platform: $(uname -s)/$(uname -m)"; exit 1 ;;
+    esac
+
+    # Try the install script first (validates checksums, works for stable releases).
+    # Fall back to a direct GitHub release download for non-semver tags (e.g. dev).
+    local install_dir="${HOME}/.local/bin"
+    if printf '%s\n' "${installer_version}" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+      show_cmd "curl -LsSf ${OPENSHELL_INSTALL_SCRIPT_URL} | OPENSHELL_VERSION=${installer_version} sh"
+      if ! curl -LsSf "${OPENSHELL_INSTALL_SCRIPT_URL}" | OPENSHELL_VERSION="${installer_version}" sh; then
+        fail_test "openshell install.sh failed for OPENSHELL_VERSION=${installer_version} (recommended command broken)"
+        exit 1
+      fi
+    else
+      local asset="openshell-${target}.tar.gz"
+      local release_url="https://github.com/NVIDIA/OpenShell/releases/download/${installer_version}"
+      show_cmd "curl -fLsS ${release_url}/${asset} | tar -xz -C ${install_dir}"
+      mkdir -p "${install_dir}"
+      if ! curl --proto '=https' --tlsv1.2 -fLsS --retry 3 "${release_url}/${asset}" | tar -xz -C "${install_dir}" openshell; then
+        fail_test "Direct CLI download failed for ${installer_version} (asset: ${asset})"
+        exit 1
+      fi
+      chmod 755 "${install_dir}/openshell"
+    fi
+    export PATH="${install_dir}:${PATH}"
+    hash -r 2>/dev/null || true
+    if ! command -v "${OPENSHELL_BIN}" >/dev/null 2>&1; then
+      fail_test "openshell CLI not on PATH after install (OPENSHELL_BIN=${OPENSHELL_BIN})"
       exit 1
     fi
-    dim "  Derived installer version: ${installer_version} (from '${raw_version}')"
+    local reported
+    reported=$("${OPENSHELL_BIN}" --version 2>&1 || true)
+    dim "  openshell --version: ${reported}"
+    pass "openshell CLI installed (${reported})"
+    return 0
   fi
 
-  # Determine platform target for direct GitHub release download.
-  local target
-  case "$(uname -s)/$(uname -m)" in
-    Linux/x86_64)            target=x86_64-unknown-linux-musl ;;
-    Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-musl ;;
-    Darwin/arm64)            target=aarch64-apple-darwin ;;
-    *) fail_test "Unsupported platform: $(uname -s)/$(uname -m)"; exit 1 ;;
-  esac
-
-  # Try the install script first (validates checksums, works for stable releases).
-  # Fall back to a direct GitHub release download for non-semver tags (e.g. dev).
-  local install_dir="${HOME}/.local/bin"
-  if printf '%s\n' "${installer_version}" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-    show_cmd "curl -LsSf ${OPENSHELL_INSTALL_SCRIPT_URL} | OPENSHELL_VERSION=${installer_version} sh"
-    if ! curl -LsSf "${OPENSHELL_INSTALL_SCRIPT_URL}" | OPENSHELL_VERSION="${installer_version}" sh; then
-      fail_test "openshell install.sh failed for OPENSHELL_VERSION=${installer_version} (recommended command broken)"
-      exit 1
-    fi
-  else
-    local asset="openshell-${target}.tar.gz"
-    local release_url="https://github.com/NVIDIA/OpenShell/releases/download/${installer_version}"
-    show_cmd "curl -fLsS ${release_url}/${asset} | tar -xz -C ${install_dir}"
-    mkdir -p "${install_dir}"
-    if ! curl --proto '=https' --tlsv1.2 -fLsS --retry 3 "${release_url}/${asset}" | tar -xz -C "${install_dir}" openshell; then
-      fail_test "Direct CLI download failed for ${installer_version} (asset: ${asset})"
-      exit 1
-    fi
-    chmod 755 "${install_dir}/openshell"
+  # Default: install the CLI build that matches the deployed gateway exactly.
+  # The gateway/supervisor images are quay.io/opendatahub/odh-openshell-{gateway,supervisor}
+  # and can carry a downstream suffix (e.g. "v0.0.116-rhaiv.6") identifying a build
+  # ahead of the last tagged upstream OpenShell release; no public CLI release is
+  # guaranteed proto-compatible with it. quay.io/opendatahub/odh-openshell-cli is
+  # built by the same pipeline off the same commit under the same tag, so pulling it
+  # by that exact tag (never truncated to a base semver) is what actually matches.
+  # (The preinstalled-CLI check above may already have fetched this.)
+  if [[ -z "$raw_version" ]]; then
+    raw_version=$(_reconcile_gateway_version_or_empty)
   fi
-
-  # Match the console command, including its PATH order.
-  export PATH="${install_dir}:${PATH}"
-  hash -r 2>/dev/null || true
-  if ! command -v "${OPENSHELL_BIN}" >/dev/null 2>&1; then
-    fail_test "openshell CLI not on PATH after install (OPENSHELL_BIN=${OPENSHELL_BIN})"
+  if [[ -z "$raw_version" ]]; then
+    fail_test "API never reported gateway_version for ${GW_ID} within ${E2E_GATEWAY_VERSION_TIMEOUT}s"
     exit 1
   fi
+  pass "Reconciled gateway_version: ${raw_version}"
+
+  local image_tag
+  if ! image_tag=$(openshell_cli_image_tag "$raw_version"); then
+    fail_test "Could not derive a CLI image tag from gateway_version='${raw_version}'"
+    exit 1
+  fi
+  local cli_image="quay.io/opendatahub/odh-openshell-cli:${image_tag}"
+  dim "  Resolved matching CLI image: ${cli_image} (from '${raw_version}')"
+
+  _extract_openshell_cli_from_image "${cli_image}"
 
   local reported
   reported=$("${OPENSHELL_BIN}" --version 2>&1 || true)
   dim "  openshell --version: ${reported}"
-  # For stable releases, verify exact version match. For overrides (dev, SHA),
-  # just confirm the binary runs.
-  if [[ -z "${E2E_OPENSHELL_VERSION}" ]]; then
-    if ! openshell_cli_matches_version "$reported" "$installer_version"; then
-      fail_test "Installed openshell version '${reported}' does not match requested ${installer_version}"
-      exit 1
-    fi
+  if ! openshell_cli_matches_version "$reported" "$image_tag"; then
+    fail_test "Installed openshell version '${reported}' does not match requested ${image_tag}"
+    exit 1
   fi
   pass "openshell CLI installed (${reported})"
 }
