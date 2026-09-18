@@ -53,8 +53,10 @@ Gateway DELETED event (gRPC watch)
   │
   ▼
 GatewayReconciler
-  ├─ 1. Clean up non-chart resources (database, Keycloak clients)
-  ├─ 2. Helm uninstall (if release exists)
+  ├─ 1. Helm uninstall (if release exists)   ← first, so the gateway pod stops
+  │                                            holding database connections
+  ├─ 2. Clean up non-chart resources (ClusterRoleBinding, Keycloak clients,
+  │     then the per-gateway database and role)
   └─ 3. Delete namespace
 ```
 
@@ -117,10 +119,11 @@ The control plane SHALL use the Helm CLI to manage gateway Helm releases program
 
 - GIVEN a Gateway DELETED event is received
 - WHEN the GatewayReconciler processes the event
-- THEN it SHALL clean up non-chart resources (database, Keycloak clients)
-- AND if a Helm release exists in the gateway namespace, it SHALL run `helm uninstall`
+- THEN if a Helm release exists in the gateway namespace, it SHALL run `helm uninstall` first, so the gateway pod stops holding database connections before the database is dropped
+- AND it SHALL then clean up non-chart resources (ClusterRoleBinding, Keycloak clients, and the per-gateway database and role)
 - AND it SHALL delete the gateway namespace
 - AND if the Helm uninstall fails, the reconciler proceeds to delete the gateway namespace (which removes all namespaced chart resources)
+- AND if the per-gateway database cleanup fails, it SHALL record a `PostgreSQLDatabase` orphan and return an error so the delete is retried (see [`gateway-deletion-finalization.spec.md`](./gateway-deletion-finalization.spec.md))
 
 ---
 
