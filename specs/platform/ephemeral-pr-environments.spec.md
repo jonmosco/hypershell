@@ -485,7 +485,7 @@ artifact across the stack.
 - THEN the workflow SHALL wait for the control plane's Konflux build for the new
   head commit
 - AND it SHALL swap the new control plane image into the environment by digest
-  before the `Deploy PR environment` check succeeds
+  before the `Deploy OpenShift Environment` check succeeds
 - AND `make openshift-seed` SHALL reuse the existing `ManagedCluster` and
   `GatewayRelease` seed resources
 - AND it SHALL delete and recreate the existing `dev-gateway` rather than reuse
