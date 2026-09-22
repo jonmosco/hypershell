@@ -34,9 +34,10 @@
 #   DATABASE_PROVIDER      Database provider: deployment, cnpg, or external (default: external)
 #   E2E_CNPG_NAMESPACE     Namespace where the CNPG operator runs (default: cnpg-system)
 #   OPENSHELL_BIN          Path to the openshell CLI binary (default: openshell)
-#   E2E_OPENSHELL_INSTALL  auto, always, or never (default: auto; CI uses always)
+#   E2E_OPENSHELL_INSTALL  auto, always, or never (default: always)
 #   E2E_OPENSHELL_VERSION  Override CLI version/tag to install (e.g. v0.0.116, dev)
 #   E2E_OPENSHELL_CLI_IMAGE  Container image to extract the CLI from (skips GitHub download)
+#   E2E_OPENSHELL_INSTALL_DIR  Where to install the CLI (default: <repo>/bin, gitignored)
 #   E2E_GATEWAY_VERSION_TIMEOUT  Seconds to wait for the runtime version (default: 300)
 set -euo pipefail
 
@@ -143,6 +144,10 @@ cleanup() {
   # Runs on every exit path -- a fatal exit 1 mid-run included -- so the
   # summary always prints, and print_results itself notes when E2E_COMPLETED
   # was never set (i.e. the run aborted before reaching the results section).
+  # Remove IPv4 gateway-host pins the kind driver added to /etc/hosts.
+  if declare -F _kind_unpin_gw_hosts >/dev/null 2>&1; then
+    _kind_unpin_gw_hosts || true
+  fi
   print_results
 }
 trap cleanup EXIT
@@ -949,7 +954,7 @@ install_openshell_cli_from_api() {
   # Container image path: extract the CLI binary directly from a container image.
   if [[ -n "${E2E_OPENSHELL_CLI_IMAGE}" ]]; then
     dim "  Extracting CLI from container image: ${E2E_OPENSHELL_CLI_IMAGE}"
-    local install_dir="${HOME}/.local/bin"
+    local install_dir="${E2E_OPENSHELL_INSTALL_DIR}"
     mkdir -p "${install_dir}"
     local ctr_name="e2e-cli-extract-$$"
     local ctr_engine
@@ -1019,10 +1024,10 @@ install_openshell_cli_from_api() {
 
   # Try the install script first (validates checksums, works for stable releases).
   # Fall back to a direct GitHub release download for non-semver tags (e.g. dev).
-  local install_dir="${HOME}/.local/bin"
+  local install_dir="${E2E_OPENSHELL_INSTALL_DIR}"
   if printf '%s\n' "${installer_version}" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-    show_cmd "curl -LsSf ${OPENSHELL_INSTALL_SCRIPT_URL} | OPENSHELL_VERSION=${installer_version} sh"
-    if ! curl -LsSf "${OPENSHELL_INSTALL_SCRIPT_URL}" | OPENSHELL_VERSION="${installer_version}" sh; then
+    show_cmd "curl -LsSf ${OPENSHELL_INSTALL_SCRIPT_URL} | OPENSHELL_VERSION=${installer_version} OPENSHELL_INSTALL_DIR=${install_dir} sh"
+    if ! curl -LsSf "${OPENSHELL_INSTALL_SCRIPT_URL}" | OPENSHELL_VERSION="${installer_version}" OPENSHELL_INSTALL_DIR="${install_dir}" sh; then
       fail_test "openshell install.sh failed for OPENSHELL_VERSION=${installer_version} (recommended command broken)"
       exit 1
     fi
