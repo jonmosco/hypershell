@@ -506,7 +506,7 @@ if grep -qE 'wait_for_oidc_token|wait_for_api_openapi|wait_for_api_healthcheck' 
 else
   PASS=$((PASS + 1))
 fi
-if grep -A20 'containerPort: 9443' "${SCRIPT_DIR}/../../deploy/base/controller.yaml" | grep -q 'readinessProbe'; then
+if grep -A20 'containerPort: 9443' "${SCRIPT_DIR}/../../deploy/base/platform-resources/controller.yaml" | grep -q 'readinessProbe'; then
   PASS=$((PASS + 1))
 else
   FAIL=$((FAIL + 1))
