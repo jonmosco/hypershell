@@ -122,5 +122,96 @@ class SyncOpenshellVersionTest(unittest.TestCase):
         self.assertNotIn("@sha256:", content)
 
 
+    def test_detects_stale_console_digest(self):
+        go_src = (
+            'const defaultConsoleImage = '
+            '"quay.io/gkrumbach07/openshell-dashboard'
+            '@sha256:' + 'b' * 64 + '"\n'
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".go", delete=False
+        ) as f:
+            f.write(go_src)
+            f.flush()
+            path = Path(f.name)
+
+        mismatches = MOD.stamp_console_image(
+            path,
+            "quay.io/gkrumbach07/openshell-dashboard",
+            "sha256:" + "a" * 64,
+            check_only=True,
+        )
+        path.unlink()
+        self.assertEqual(len(mismatches), 1)
+        self.assertIn("b" * 64, mismatches[0])
+
+    def test_stamps_console_digest(self):
+        go_src = (
+            'const defaultConsoleImage = '
+            '"quay.io/gkrumbach07/openshell-dashboard'
+            '@sha256:' + 'b' * 64 + '"\n'
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".go", delete=False
+        ) as f:
+            f.write(go_src)
+            f.flush()
+            path = Path(f.name)
+
+        new_digest = "sha256:" + "a" * 64
+        MOD.stamp_console_image(
+            path,
+            "quay.io/gkrumbach07/openshell-dashboard",
+            new_digest,
+            check_only=False,
+        )
+        content = path.read_text()
+        path.unlink()
+        self.assertIn("@" + new_digest, content)
+        self.assertNotIn("b" * 64, content)
+
+    def test_error_when_console_constant_missing(self):
+        go_src = 'package gateway\n\nconst somethingElse = "foo"\n'
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".go", delete=False
+        ) as f:
+            f.write(go_src)
+            f.flush()
+            path = Path(f.name)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            MOD.stamp_console_image(
+                path,
+                "quay.io/gkrumbach07/openshell-dashboard",
+                "sha256:" + "a" * 64,
+                check_only=True,
+            )
+        path.unlink()
+        self.assertIn("defaultConsoleImage constant not found", str(ctx.exception))
+
+    def test_no_mismatch_when_console_current(self):
+        digest = "sha256:" + "a" * 64
+        go_src = (
+            'const defaultConsoleImage = '
+            '"quay.io/gkrumbach07/openshell-dashboard'
+            '@' + digest + '"\n'
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".go", delete=False
+        ) as f:
+            f.write(go_src)
+            f.flush()
+            path = Path(f.name)
+
+        mismatches = MOD.stamp_console_image(
+            path,
+            "quay.io/gkrumbach07/openshell-dashboard",
+            digest,
+            check_only=True,
+        )
+        path.unlink()
+        self.assertEqual(mismatches, [])
+
+
 if __name__ == "__main__":
     unittest.main()

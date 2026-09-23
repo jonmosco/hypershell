@@ -30,6 +30,24 @@ MANAGED_FILES: list[tuple[Path, list[str]]] = [
     ),
 ]
 
+# Go source file containing the defaultConsoleImage constant, pinned by
+# digest (image@sha256:...).  OPENSHELL_CONSOLE_IMAGE and
+# OPENSHELL_CONSOLE_DIGEST from OPENSHELL_VERSION are the source of truth.
+CONSOLE_IMAGE_FILE = (
+    REPO_ROOT
+    / "components"
+    / "control-plane"
+    / "internal"
+    / "gateway"
+    / "config.go"
+)
+
+_CONSOLE_CONST_RE = re.compile(
+    r'(const defaultConsoleImage\s*=\s*")'
+    r'([^"]+)'
+    r'(")'
+)
+
 
 def parse_openshell_version() -> dict[str, str]:
     variables: dict[str, str] = {}
@@ -110,6 +128,43 @@ def stamp_file(
     return mismatches
 
 
+def stamp_console_image(
+    path: Path,
+    image: str,
+    digest: str,
+    *,
+    check_only: bool,
+) -> list[str]:
+    """Stamp or verify the defaultConsoleImage Go constant."""
+    if not path.exists():
+        return []
+
+    text = path.read_text()
+    m = _CONSOLE_CONST_RE.search(text)
+    if not m:
+        raise RuntimeError(
+            f"{path}: defaultConsoleImage constant not found - "
+            "was it renamed or reformatted?"
+        )
+
+    expected = f"{image}@{digest}"
+    current = m.group(2)
+    if current == expected:
+        return []
+
+    try:
+        rel = path.relative_to(REPO_ROOT)
+    except ValueError:
+        rel = path
+    mismatch = f"  {rel}: defaultConsoleImage has {current}, expected {expected}"
+
+    if not check_only:
+        text = _CONSOLE_CONST_RE.sub(rf"\g<1>{expected}\3", text)
+        path.write_text(text)
+
+    return [mismatch]
+
+
 def main() -> int:
     check_only = "--stamp" not in sys.argv
 
@@ -125,6 +180,18 @@ def main() -> int:
             continue
         all_mismatches.extend(
             stamp_file(path, env_names, tag, check_only=check_only)
+        )
+
+    console_image = env.get("OPENSHELL_CONSOLE_IMAGE", "")
+    console_digest = env.get("OPENSHELL_CONSOLE_DIGEST", "")
+    if console_image and console_digest:
+        all_mismatches.extend(
+            stamp_console_image(
+                CONSOLE_IMAGE_FILE,
+                console_image,
+                console_digest,
+                check_only=check_only,
+            )
         )
 
     if all_mismatches:

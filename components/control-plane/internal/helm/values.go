@@ -59,6 +59,8 @@ type ValuesBuilder struct {
 	ExternalCAIssuerName string
 	// ExternalCAIssuerKind is the kind of the external CA issuer (ClusterIssuer or Issuer)
 	ExternalCAIssuerKind string
+	// HasTrustedCA indicates whether the gateway-trusted-ca ConfigMap exists
+	HasTrustedCA bool
 }
 
 // Build computes Helm chart values from the Gateway configuration.
@@ -130,8 +132,7 @@ func (b *ValuesBuilder) buildCoreValues(values map[string]interface{}) error {
 	setNestedValue(values, true, "serviceAccount", "create")
 	setNestedValue(values, true, "sandboxServiceAccount", "create")
 
-	// NetworkPolicy disabled (see spec decision); the control plane manages
-	// network isolation outside the chart.
+	// NetworkPolicy disabled; see openshell-gateway-helm-adoption.spec.md.
 	setNestedValue(values, false, "networkPolicy", "enabled")
 	setNestedValue(values, true, "supervisor", "sandboxRuntime", "networkPolicyEnforced")
 
@@ -147,8 +148,8 @@ func (b *ValuesBuilder) buildCoreValues(values map[string]interface{}) error {
 	// Database configuration
 	setNestedValue(values, "openshell-gateway-db-credentials", "server", "externalDbSecret")
 
-	// Trusted CA ConfigMap (optional - set when OIDC is configured)
-	if b.Gateway.OIDC.Issuer != "" {
+	// Trusted CA ConfigMap - only set when OIDC is configured and the ConfigMap was actually copied
+	if b.HasTrustedCA && b.Gateway.OIDC.Issuer != "" {
 		setNestedValue(values, "gateway-trusted-ca", "server", "oidc", "caConfigMapName")
 	}
 

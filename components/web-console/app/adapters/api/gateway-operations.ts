@@ -50,6 +50,7 @@ type GatewayApiFactory = (correlationId: string) => GatewayApiClient;
 const placementPageSize = defaultGatewayListRequest.size;
 
 const gatewaySortFields = {
+  activeSandboxes: "active_sandbox_count",
   cluster: "cluster_id",
   created: "created_at",
   endpoint: "route_address",
@@ -172,7 +173,6 @@ function toGatewayRecord(gateway: Gateway): GatewayRecord {
     ...(consoleUrl ? { consoleUrl } : {}),
     ...(gateway.created_at ? { createdAt: gateway.created_at } : {}),
     ...(createdBy ? { createdBy } : {}),
-    databaseId: gateway.database_id,
     externalDns:
       gateway.external_dns || endpointFromRouteAddress(gateway.route_address),
     ...(gatewayVersion ? { gatewayVersion } : {}),
@@ -539,7 +539,6 @@ export function createGatewayControlPlaneAdapter(
           await apiClient(apiFactory, context).gateways.create(
             {
               cluster_id: input.clusterId,
-              database_id: "",
               name: input.name,
               release_id: "",
               route: JSON.stringify({ enabled: true }),

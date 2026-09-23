@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/openshift-online/hypershell/components/control-plane/internal/exposure"
@@ -26,19 +25,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 )
-
-// networkPoliciesDisabledLogOnce keeps the "network policies disabled" notice to
-// a single line per process. When GATEWAY_SKIP_NETWORK_POLICIES=true (the
-// default in the kind overlay) the skip branches run on every reconcile, so
-// logging per-resource produced steady per-reconcile noise under a misleading
-// DEBUG label. logNetworkPoliciesDisabled emits the notice once instead.
-var networkPoliciesDisabledLogOnce sync.Once
-
-func logNetworkPoliciesDisabled() {
-	networkPoliciesDisabledLogOnce.Do(func() {
-		log.Printf("network policies disabled (GATEWAY_SKIP_NETWORK_POLICIES=true); skipping gateway NetworkPolicy resources")
-	})
-}
 
 func ReconcileGateway(
 	ctx context.Context,
@@ -96,9 +82,9 @@ func ReconcileGateway(
 	dbReconciler, err := newDatabaseReconciler(opts)
 	if err != nil {
 		report(ConditionDatabaseReady, StatusFailed, "Database provisioning failed - the database service is unavailable")
-		return fmt.Errorf("database provider for gateway in namespace %s: %w", nsConfig.Name, err)
+		return fmt.Errorf("database reconciler for gateway in namespace %s: %w", nsConfig.Name, err)
 	}
-	if err := dbReconciler.Reconcile(ctx, dynamicClient, clientset, nsConfig.Name, opts.GatewayID, opts.RotateDBCredentials); err != nil {
+	if err := dbReconciler.Reconcile(ctx, dynamicClient, clientset, nsConfig.Name, opts.GatewayID); err != nil {
 		report(ConditionDatabaseReady, StatusFailed, "Database provisioning failed - unable to provision the gateway database")
 		return err
 	}
@@ -129,7 +115,7 @@ func ReconcileGateway(
 	report(ConditionGatewayDeployed, StatusInProgress, "")
 
 	// Copy trusted CA bundle (for OIDC issuer verification)
-	reconcileTrustedCABundle(ctx, clientset, opts.ControlPlaneNamespace, nsConfig.Name)
+	hasTrustedCA := reconcileTrustedCABundle(ctx, clientset, opts.ControlPlaneNamespace, nsConfig.Name)
 
 	// Reconcile OpenShift SCC binding BEFORE Helm install
 	// (sandbox pods need privileged SCC to schedule)
@@ -141,8 +127,8 @@ func ReconcileGateway(
 
 	// Deploy gateway via Helm
 	// The chart handles: Deployment, Services, RBAC, cert-manager, GRPCRoute,
-	// BackendTLSPolicy, Route, credential KEK, NetworkPolicy (disabled)
-	if err := deployGatewayViaHelm(ctx, helmClient, nsConfig, opts); err != nil {
+	// BackendTLSPolicy, Route, credential KEK
+	if err := deployGatewayViaHelm(ctx, helmClient, nsConfig, opts, hasTrustedCA); err != nil {
 		report(ConditionGatewayDeployed, StatusFailed, "Gateway deployment failed - unable to deploy the gateway workload")
 		return fmt.Errorf("deploy gateway via helm in %s: %w", nsConfig.Name, err)
 	}
@@ -267,17 +253,20 @@ func DeleteGatewayResources(
 		}
 	}
 
-	if dbReconciler, err := newDatabaseReconciler(opts); err == nil {
-		cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cleanupCancel()
-		if delErr := dbReconciler.Delete(cleanupCtx, dynamicClient, clientset, opts.GatewayID); delErr != nil {
-			// Transient error (server unreachable, DDL failure): return so the
-			// delete-reconcile retries. Terminal errors (admin secret unreadable)
-			// are handled inside Delete and return nil; in-cluster cleanup still runs.
-			return fmt.Errorf("database cleanup for gateway %s: %w", opts.GatewayID, delErr)
-		}
-	} else {
-		log.Printf("WARN gateway %s: cannot construct database reconciler for delete: %v", opts.GatewayID, err)
+	dbReconciler, err := newDatabaseReconciler(opts)
+	if err != nil {
+		return fmt.Errorf("database reconciler for gateway %s delete: %w", opts.GatewayID, err)
+	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cleanupCancel()
+	if delErr := dbReconciler.Delete(cleanupCtx, dynamicClient, clientset, opts.GatewayID); delErr != nil {
+		// The database and role may still exist on the server. Record the
+		// leftover so it is operator-visible even if the controller restarts and
+		// loses the queued retry, then return the error so the delete-reconcile
+		// retries (gateway-deletion-finalization.spec.md).
+		recordOrphan(ctx, opts, "PostgreSQLDatabase", gatewayDBName(opts.GatewayID),
+			fmt.Sprintf("database cleanup failed during gateway deletion; the gateway database and role may remain on the server and the delete will be retried: %v", delErr))
+		return fmt.Errorf("database cleanup for gateway %s: %w", opts.GatewayID, delErr)
 	}
 
 	for _, credNS := range credentialNamespaces {
@@ -385,14 +374,12 @@ func DeleteLabeledNamespaceResources(
 }
 
 // DeleteGatewayAPIResources reconciles the desired *absence* of a gateway's
-// route: it removes the GRPCRoute, BackendTLSPolicy, backend-CA ConfigMap and
-// router NetworkPolicy, tears down the console (which follows the route), and
-// clears the stored route_address. It attempts every deletion regardless of
-// individual failures and returns their joined errors (nil once everything is
-// absent), so a caller -- the provisioning path's route-disabled branch and the
-// health loop, which owns a Running gateway the provisioning path never revisits
-// -- can retry until the route and its console are fully gone rather than
-// stopping on partial cleanup. Idempotent: absent resources are ignored.
+// route: it removes the GRPCRoute, BackendTLSPolicy, and backend-CA ConfigMap,
+// tears down the console (which follows the route), and clears the stored
+// route_address. It attempts every deletion regardless of individual failures
+// and returns their joined errors (nil once everything is absent), so a caller
+// can retry until the route and its console are fully gone rather than stopping
+// on partial cleanup. Idempotent: absent resources are ignored.
 func DeleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) error {
 	var errs []error
 
@@ -416,15 +403,6 @@ func DeleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interf
 
 	if err := clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, "openshell-gateway-backend-ca", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete backend CA ConfigMap in %s: %w", namespace, err))
-	}
-
-	netpolGVR := schema.GroupVersionResource{
-		Group:    "networking.k8s.io",
-		Version:  "v1",
-		Resource: "networkpolicies",
-	}
-	if err := dynamicClient.Resource(netpolGVR).Namespace(namespace).Delete(ctx, "openshell-gateway-allow-router", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		errs = append(errs, fmt.Errorf("delete router NetworkPolicy in %s: %w", namespace, err))
 	}
 
 	// The console follows the route, so removing the route removes the console.
@@ -474,7 +452,6 @@ func RouteResourcesAbsent(ctx context.Context, dynamicClient dynamic.Interface, 
 	btlsGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "backendtlspolicies"}
 	httpRouteGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}
 	openShiftRouteGVR := schema.GroupVersionResource{Group: "route.openshift.io", Version: "v1", Resource: "routes"}
-	netpolGVR := schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}
 
 	type dynamicProbe struct {
 		gvr  schema.GroupVersionResource
@@ -486,12 +463,10 @@ func RouteResourcesAbsent(ctx context.Context, dynamicClient dynamic.Interface, 
 		dynamicProbes = append(dynamicProbes,
 			dynamicProbe{grpcRouteGVR, "openshell-gateway"},
 			dynamicProbe{btlsGVR, "openshell-gateway"},
-			dynamicProbe{netpolGVR, "openshell-gateway-allow-router"},
 		)
 	case IngressModeRoute:
 		dynamicProbes = append(dynamicProbes,
 			dynamicProbe{openShiftRouteGVR, "openshell-gateway"},
-			dynamicProbe{netpolGVR, "openshell-gateway-allow-router"},
 		)
 	case IngressModeNone:
 		// There is no selected gateway exposure to probe.
@@ -502,8 +477,6 @@ func RouteResourcesAbsent(ctx context.Context, dynamicClient dynamic.Interface, 
 		dynamicProbe{httpRouteGVR, consoleName},
 		dynamicProbe{openShiftRouteGVR, consoleName},
 		dynamicProbe{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, consoleName},
-		dynamicProbe{netpolGVR, "openshell-console-allow-router"},
-		dynamicProbe{netpolGVR, "openshell-gateway-allow-console"},
 	)
 	for _, p := range dynamicProbes {
 		if _, err := dynamicClient.Resource(p.gvr).Namespace(namespace).Get(ctx, p.name, metav1.GetOptions{}); err == nil {
@@ -569,8 +542,7 @@ func readServerTLSCA(ctx context.Context, clientset kubernetes.Interface, namesp
 // reconcileRouteResources handles the non-Route resources needed when the
 // gateway is exposed through an OpenShift Route. The Route itself is owned by
 // the Helm chart (openshiftRoute.enabled=true in the chart values); this
-// function publishes the route address back to the API server and reconciles
-// the router NetworkPolicy that allows traffic from the ingress namespace.
+// function publishes the route address back to the API server.
 func reconcileRouteResources(ctx context.Context, dynamicClient dynamic.Interface, nsConfig NamespaceConfig, opts ReconcileOpts) error {
 	namespace := nsConfig.Name
 
@@ -582,63 +554,14 @@ func reconcileRouteResources(ctx context.Context, dynamicClient dynamic.Interfac
 
 	publishRouteAddress(ctx, opts, namespace, hostname)
 
-	routerNS := gatewayIngressNamespace()
-	ingressRule := map[string]interface{}{
-		"ports": []interface{}{
-			map[string]interface{}{
-				"port":     int64(8080),
-				"protocol": "TCP",
-			},
-		},
-		"from": []interface{}{
-			map[string]interface{}{
-				"namespaceSelector": map[string]interface{}{
-					"matchLabels": map[string]interface{}{
-						"kubernetes.io/metadata.name": routerNS,
-					},
-				},
-			},
-		},
-	}
-
-	routerNetpol := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "networking.k8s.io/v1",
-			"kind":       "NetworkPolicy",
-			"metadata": map[string]interface{}{
-				"name":      "openshell-gateway-allow-router",
-				"namespace": namespace,
-				"labels": map[string]interface{}{
-					"app.kubernetes.io/name":       "openshell",
-					"app.kubernetes.io/component":  "gateway",
-					"app.kubernetes.io/managed-by": "hypershell-control-plane",
-					"hypershell.redhat.io/managed": "true",
-				},
-			},
-			"spec": map[string]interface{}{
-				"podSelector": map[string]interface{}{
-					"matchLabels": map[string]interface{}{
-						"app.kubernetes.io/instance": "openshell-gateway",
-						"app.kubernetes.io/name":     "openshell",
-					},
-				},
-				"policyTypes": []interface{}{"Ingress"},
-				"ingress":     []interface{}{ingressRule},
-			},
-		},
-	}
-	if err := reconcileResource(ctx, dynamicClient, routerNetpol); err != nil {
-		log.Printf("WARN failed to reconcile router NetworkPolicy: %v", err)
-	}
-
 	log.Printf("INFO Route resources reconciled in namespace %s (hostname=%s)", namespace, hostname)
 	return nil
 }
 
-// DeleteRouteResources removes the OpenShift gateway Route, the router
-// NetworkPolicy, and all console resources. It also clears the stored route
-// address. It attempts all operations and returns all errors so the health loop
-// can retry incomplete cleanup.
+// DeleteRouteResources removes the OpenShift gateway Route and all console
+// resources. It also clears the stored route address. It attempts all
+// operations and returns all errors so the health loop can retry incomplete
+// cleanup.
 func DeleteRouteResources(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) error {
 	var errs []error
 
@@ -649,15 +572,6 @@ func DeleteRouteResources(ctx context.Context, dynamicClient dynamic.Interface, 
 	}
 	if err := dynamicClient.Resource(routeGVR).Namespace(namespace).Delete(ctx, "openshell-gateway", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete gateway Route in %s: %w", namespace, err))
-	}
-
-	netpolGVR := schema.GroupVersionResource{
-		Group:    "networking.k8s.io",
-		Version:  "v1",
-		Resource: "networkpolicies",
-	}
-	if err := dynamicClient.Resource(netpolGVR).Namespace(namespace).Delete(ctx, "openshell-gateway-allow-router", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		errs = append(errs, fmt.Errorf("delete router NetworkPolicy in %s: %w", namespace, err))
 	}
 
 	if err := DeleteConsole(ctx, dynamicClient, clientset, namespace, opts); err != nil {
@@ -1350,81 +1264,6 @@ func DetectCertManager(clientset *kubernetes.Clientset) bool {
 	return false
 }
 
-// cnpgAPIGroupVersion is the exact CNPG API group and version this codebase
-// integration depends on. Detection is pinned to this version, rather than
-// any postgresql.cnpg.io/* prefix, because the resource shapes this code
-// builds -- Cluster, Database, and DatabaseRole specs -- are v1-specific.
-const cnpgAPIGroupVersion = "postgresql.cnpg.io/v1"
-
-// requiredCNPGResourceNames are the plural resource names this codebase reads
-// or writes directly: clusters (ManagedDatabaseReconciler) and databases and
-// databaseroles (per-gateway provisioning below). Finding that some
-// postgresql.cnpg.io API group merely exists is not sufficient evidence CNPG
-// is usable: a partial or version-mismatched install could serve one
-// resource but not the others, and that would otherwise surface much later
-// as an unstructured-apply 404 deep inside gateway provisioning instead of
-// at startup or capability-detection time.
-var requiredCNPGResourceNames = []string{"clusters", "databases", "databaseroles"}
-
-// missingCNPGResources reports which of requiredCNPGResourceNames are absent
-// from a postgresql.cnpg.io/v1 APIResourceList. A nil list (group/version not
-// found at all) is reported as everything missing.
-func missingCNPGResources(list *metav1.APIResourceList) []string {
-	served := map[string]bool{}
-	if list != nil {
-		for _, r := range list.APIResources {
-			served[r.Name] = true
-		}
-	}
-	var missing []string
-	for _, name := range requiredCNPGResourceNames {
-		if !served[name] {
-			missing = append(missing, name)
-		}
-	}
-	return missing
-}
-
-// DetectCNPG reports whether the exact CNPG API resources this codebase
-// depends on (Cluster, Database, DatabaseRole in postgresql.cnpg.io/v1) are
-// served by the cluster. It is a best-effort, non-fatal capability check used
-// to gate reconciliation of individual ManagedDatabase and Gateway resources
-// whose provider is "cnpg", independent of the control plane configured
-// DATABASE_PROVIDER default; see RequireCNPGAPI for the fail-fast startup
-// check.
-func DetectCNPG(clientset kubernetes.Interface) bool {
-	list, err := clientset.Discovery().ServerResourcesForGroupVersion(cnpgAPIGroupVersion)
-	if err != nil {
-		log.Printf("WARN CNPG operator not detected: %s not found in cluster discovery: %v", cnpgAPIGroupVersion, err)
-		return false
-	}
-	if missing := missingCNPGResources(list); len(missing) > 0 {
-		log.Printf("WARN CNPG operator not detected: %s is present but missing required resources %v", cnpgAPIGroupVersion, missing)
-		return false
-	}
-	log.Printf("INFO CNPG operator detected: %s (clusters, databases, databaseroles)", cnpgAPIGroupVersion)
-	return true
-}
-
-// RequireCNPGAPI verifies that the exact CNPG API resources this codebase
-// depends on (Cluster, Database, DatabaseRole in postgresql.cnpg.io/v1) are
-// served by the cluster, returning a descriptive, non-fatal error if they are
-// not. Callers configured with DATABASE_PROVIDER=cnpg use this at startup to
-// fail cleanly before launching any reconcilers, rather than deferring the
-// failure to the first CNPG-backed reconciliation. The caller must pass a
-// non-nil client; unlike DetectCNPG, this is a startup precondition check,
-// not a best-effort capability probe.
-func RequireCNPGAPI(clientset kubernetes.Interface) error {
-	list, err := clientset.Discovery().ServerResourcesForGroupVersion(cnpgAPIGroupVersion)
-	if err != nil {
-		return fmt.Errorf("DATABASE_PROVIDER=cnpg requires the CNPG operator %s API group, which was not found: %w", cnpgAPIGroupVersion, err)
-	}
-	if missing := missingCNPGResources(list); len(missing) > 0 {
-		return fmt.Errorf("DATABASE_PROVIDER=cnpg requires CNPG resources %v in %s, but the cluster is missing %v; install or upgrade the CloudNativePG operator, or set DATABASE_PROVIDER=deployment", requiredCNPGResourceNames, cnpgAPIGroupVersion, missing)
-	}
-	return nil
-}
-
 func DetectGatewayAPI(clientset *kubernetes.Clientset) bool {
 	_, resources, err := clientset.Discovery().ServerGroupsAndResources()
 	if err != nil {
@@ -1774,62 +1613,6 @@ func reconcileGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Int
 		}
 		if err := reconcileResource(ctx, dynamicClient, btlsPolicy); err != nil {
 			log.Printf("WARN failed to reconcile BackendTLSPolicy (may require OpenShift 4.22+): %v", err)
-		}
-	}
-
-	// Build the router → gateway NetworkPolicy unless dev has opted out (Kind's
-	// out-of-cluster proxy has a source IP no selector can match, so the policy
-	// would blackhole gateway ingress). Restrict source to the namespace hosting
-	// the shared Gateway so only the admin-provisioned proxy can reach the ports.
-	if opts.SkipNetworkPolicies {
-		logNetworkPoliciesDisabled()
-	} else {
-		ingressRule := map[string]interface{}{
-			"ports": []interface{}{
-				map[string]interface{}{
-					"port":     int64(8080),
-					"protocol": "TCP",
-				},
-			},
-			"from": []interface{}{
-				map[string]interface{}{
-					"namespaceSelector": map[string]interface{}{
-						"matchLabels": map[string]interface{}{
-							"kubernetes.io/metadata.name": gwNS,
-						},
-					},
-				},
-			},
-		}
-
-		routerNetpol := &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"apiVersion": "networking.k8s.io/v1",
-				"kind":       "NetworkPolicy",
-				"metadata": map[string]interface{}{
-					"name":      "openshell-gateway-allow-router",
-					"namespace": namespace,
-					"labels": map[string]interface{}{
-						"app.kubernetes.io/name":       "openshell",
-						"app.kubernetes.io/component":  "gateway",
-						"app.kubernetes.io/managed-by": "hypershell-control-plane",
-						"hypershell.redhat.io/managed": "true",
-					},
-				},
-				"spec": map[string]interface{}{
-					"podSelector": map[string]interface{}{
-						"matchLabels": map[string]interface{}{
-							"app.kubernetes.io/instance": "openshell-gateway",
-							"app.kubernetes.io/name":     "openshell",
-						},
-					},
-					"policyTypes": []interface{}{"Ingress"},
-					"ingress":     []interface{}{ingressRule},
-				},
-			},
-		}
-		if err := reconcileResource(ctx, dynamicClient, routerNetpol); err != nil {
-			log.Printf("WARN failed to reconcile router NetworkPolicy: %v", err)
 		}
 	}
 

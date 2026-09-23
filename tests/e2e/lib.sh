@@ -107,22 +107,24 @@ retry_until() {
   return 1
 }
 
-# Keep this rule consistent with buildOpenShellInstallCommand in
-# packages/gateway-management-ui/src/gateways/gateway-connections.ts.
-# Remove surrounding space and the first "-" suffix. Add a leading "v".
-openshell_installer_version() {
+# openshell_cli_image_tag - normalize a gateway_version string (as the control
+# plane reconciles it from the gateway's health endpoint, e.g.
+# "0.0.116-rhaiv.6") into the image tag used by
+# quay.io/opendatahub/odh-openshell-cli. Trims whitespace and adds a leading
+# "v" when absent; the suffix (e.g. "-rhaiv.6") is kept, not stripped, because
+# it identifies a downstream build that can be ahead of the last tagged
+# upstream OpenShell release and therefore proto-incompatible with it - the
+# only CLI guaranteed to match is the one built from the same tag by the same
+# pipeline as the deployed gateway/supervisor images.
+openshell_cli_image_tag() {
   local raw="$1"
-  # trim leading/trailing whitespace (mirrors the TS .trim())
   raw="${raw#"${raw%%[![:space:]]*}"}"
   raw="${raw%"${raw##*[![:space:]]}"}"
   [[ -z "$raw" ]] && return 1
-  # Strip the first "-" and all following text (v0.0.109-rh9a8f8 -> v0.0.109).
-  local base="${raw%%-*}"
-  [[ -z "$base" ]] && return 1
-  if [[ "$base" == v* ]]; then
-    printf '%s' "$base"
+  if [[ "$raw" == v* ]]; then
+    printf '%s' "$raw"
   else
-    printf 'v%s' "$base"
+    printf 'v%s' "$raw"
   fi
 }
 
@@ -163,16 +165,21 @@ source "${_E2E_REPO_ROOT}/OPENSHELL_VERSION"
 : "${OPENSHELL_BIN:=openshell}"
 # How the e2e test obtains the openshell CLI:
 #   auto   - install the gateway-matched version via the console-recommended
-#            command if the CLI is not already present (default)
+#            command if the CLI is not already present
 #   always - always install the gateway-matched version, even if one is present
+#            (default): guarantees the CLI matches the deployed gateway and
+#            never reuses a stale pre-installed binary
 #   never  - require a pre-installed CLI; do not install
-: "${E2E_OPENSHELL_INSTALL:=auto}"
+: "${E2E_OPENSHELL_INSTALL:=always}"
 # Override the CLI version to install instead of deriving it from
 # gateway_version. Accepts any GitHub release tag (e.g. v0.0.116, dev).
 : "${E2E_OPENSHELL_VERSION:=}"
 # Container image to extract the CLI from. When set, the CLI is copied out of
 # the image instead of downloaded from GitHub. Set to empty to disable.
 : "${E2E_OPENSHELL_CLI_IMAGE:=${OPENSHELL_CLI_IMAGE}:${OPENSHELL_TAG}}"
+# Directory the CLI is installed into. Defaults to a gitignored repo-local dir
+# so runs never mutate the caller's ${HOME}/.local/bin. Prepended to PATH.
+: "${E2E_OPENSHELL_INSTALL_DIR:=${_E2E_REPO_ROOT}/bin}"
 # Upstream install script the console links to (installScriptUrl in the UI).
 : "${OPENSHELL_INSTALL_SCRIPT_URL:=https://raw.githubusercontent.com/openshift-online/hypershell/main/scripts/install-openshell.sh}"
 # Bounded wait for the control plane to reconcile gateway_version from the
@@ -228,32 +235,58 @@ e2e_dump_namespace_gc_logs() {
     | while IFS= read -r line; do dim "    $line"; done || true
 }
 
-# --- E2E_MODE (short | long) ---
+# --- E2E_MODE (short | perf | long) ---
 #
-# Each suite step declares a minimum mode. short-tagged steps run in both
-# modes; long-tagged steps run only in long mode. Default is long so existing
+# Each suite step declares a minimum mode. short-tagged steps run in every
+# mode; long-tagged steps run only in long mode. Default is long so existing
 # CI invocations are unchanged. See e2e-testing.spec.md "E2E Short and Long Modes".
+#
+# short is the canonical quick check: the core gateway + sandbox lifecycle (no
+# shared-env mutation, no broad-RBAC or infra sweeps). It owns the gateway it
+# creates and tears it fully down (see the E2E_MODE != "perf" cleanup/GC paths in
+# e2e-openshell.sh), and runs as a single principal (see e2e_multi_identity). It
+# is a self-contained, non-destructive full-lifecycle check -- create -> run ->
+# interact -> delete, leaving nothing behind -- safe to run repeatedly against a
+# live/shared environment (post-rollout promotion gate, synthetic monitoring,
+# post-deploy sanity check).
+#
+# perf runs the same step subset as short but is tailored to the performance
+# harness: it reuses a long-lived "canary" gateway instead of owning one (it does
+# not create or tear down the gateway) and exercises the multi-identity RBAC path.
+# Use perf only from e2e-performance.sh.
 
 e2e_validate_mode() {
   case "${E2E_MODE}" in
-    short|long) ;;
+    short|perf|long) ;;
     *)
-      red "ERROR: E2E_MODE must be 'short' or 'long' (got '${E2E_MODE}')"
+      red "ERROR: E2E_MODE must be 'short', 'perf', or 'long' (got '${E2E_MODE}')"
       exit 1
       ;;
   esac
 }
 
 # e2e_step <short|long> - return 0 if the current mode should run this step.
+# perf gates identically to short: it runs short-tagged steps and skips
+# long-tagged ones.
 e2e_step() {
   local min_mode="${1:?mode tag required}"
   case "${E2E_MODE}" in
     long) return 0 ;;
-    short)
+    short|perf)
       [[ "${min_mode}" == "short" ]] && return 0
       return 1
       ;;
   esac
+}
+
+# e2e_multi_identity - return 0 when the run may act as more than one principal
+# (impersonating other users via token-exchange, e.g. the developer/platform
+# RBAC matrix). short runs as a single identity and is not granted impersonation,
+# so it returns non-zero; perf and long return 0. Steps that mint a token for a
+# *different* user than the run's own identity SHALL gate on this so the short
+# check stays minimal-privilege and safe against a live environment.
+e2e_multi_identity() {
+  [[ "${E2E_MODE}" != "short" ]]
 }
 
 e2e_utc_now() {
@@ -458,8 +491,9 @@ else:
 " 2>/dev/null)" || true
 }
 
-# Discover the seeded cluster, release, and managed-database ids via the API.
-# Sets E2E_CLUSTER_ID, E2E_RELEASE_ID, E2E_DATABASE_ID.
+# Discover the seeded cluster and release ids via the API.
+# Sets E2E_CLUSTER_ID, E2E_RELEASE_ID. Gateway databases are provisioned by the
+# control plane from its mounted admin Secret and need no seed id.
 # Requires API_HOST and api_curl. Never hardcodes ids.
 #
 # Name pins (optional): E2E_SEED_CLUSTER_NAME, E2E_SEED_RELEASE_NAME.
@@ -489,6 +523,23 @@ e2e_auto_seed_enabled() {
   esac
 }
 
+# E2E_ALLOW_UNSEEDED lets the suite run against a platform that has no registered
+# managed cluster and no published gateway release. The gateway API does not
+# require either id: the control plane assigns database placement server-side and
+# resolves an empty release_id to the platform default gateway image
+# (GATEWAY_IMAGE), while an empty cluster_id disables the server-side cluster
+# filter so a single control plane still reconciles the gateway. This is the
+# behavior a default user gets, and it lets a post-rollout release check verify
+# an already-deployed environment without registering inventory or provisioning
+# anything. Default (unset/0) preserves the seed-required behavior: ids must be
+# discovered (and optionally auto-seeded) before a gateway is created.
+e2e_allow_unseeded() {
+  case "${E2E_ALLOW_UNSEEDED:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 e2e_run_platform_seed() {
   local root
   root="$(cd "${_E2E_LIB_DIR}/../.." && pwd)"
@@ -510,13 +561,12 @@ e2e_print_seed_discovery_error() {
   red "ERROR: could not discover seeded cluster/release ids from the API"
   dim "  cluster=${E2E_SEED_CLUSTER_NAME:-<first>} id=${E2E_CLUSTER_ID:-<empty>} (${_E2E_CLUSTER_LIST_SUMMARY:-unknown})"
   dim "  release=${E2E_SEED_RELEASE_NAME:-<first>} id=${E2E_RELEASE_ID:-<empty>} (${_E2E_RELEASE_LIST_SUMMARY:-unknown})"
-  dim "  database=${E2E_DATABASE_ID:-<empty>} (${_E2E_DATABASE_LIST_SUMMARY:-unknown})"
   dim "  Re-seed once the API is healthy: SEED_STRICT=true make openshift-seed"
   dim "  (Kind: SEED_STRICT=true make kind-seed)"
 }
 
 e2e_fetch_seed_ids() {
-  local clusters releases databases
+  local clusters releases
   if [[ "${E2E_INFRA_DRIVER:-}" == "kind" ]]; then
     : "${E2E_SEED_CLUSTER_NAME:=local-kind}"
     : "${E2E_SEED_RELEASE_NAME:=dev-release}"
@@ -530,14 +580,11 @@ e2e_fetch_seed_ids() {
 
   clusters=$(api_curl "${API_HOST}/api/hypershell/v1/managed_clusters" 2>/dev/null || true)
   releases=$(api_curl "${API_HOST}/api/hypershell/v1/gateway_releases" 2>/dev/null || true)
-  databases=$(api_curl "${API_HOST}/api/hypershell/v1/managed_databases" 2>/dev/null || true)
 
   E2E_CLUSTER_ID=$(echo "$clusters" | e2e_json_first_id "${E2E_SEED_CLUSTER_NAME}")
   E2E_RELEASE_ID=$(echo "$releases" | e2e_json_first_id "${E2E_SEED_RELEASE_NAME}")
-  E2E_DATABASE_ID=$(echo "$databases" | e2e_json_first_id)
   _E2E_CLUSTER_LIST_SUMMARY=$(echo "$clusters" | e2e_json_list_summary)
   _E2E_RELEASE_LIST_SUMMARY=$(echo "$releases" | e2e_json_list_summary)
-  _E2E_DATABASE_LIST_SUMMARY=$(echo "$databases" | e2e_json_list_summary)
 
   e2e_seed_ids_ready
 }
@@ -566,13 +613,20 @@ e2e_seed_ids_ready() {
 }
 
 # Fill any missing seed ids from the API. Rediscover when cluster is set but
-# release is not (or the reverse).
+# release is not (or the reverse). When E2E_ALLOW_UNSEEDED is set, treat seed ids
+# as best-effort: use them if the platform already has inventory, but never
+# require them and never auto-seed. Any id left empty is sent as an empty string,
+# which the gateway API accepts (default image + default placement).
 e2e_ensure_seed_ids() {
   e2e_seed_ids_ready && return 0
+  if e2e_allow_unseeded; then
+    e2e_fetch_seed_ids || true
+    return 0
+  fi
   e2e_discover_seed_ids
 }
 
-# Copy cluster/release/database ids from a gateway JSON object or list.
+# Copy cluster/release ids from a gateway JSON object or list.
 # Does not overwrite ids that are already set.
 e2e_apply_seed_ids_from_gateway_json() {
   local json="${1:-}" name="${2:-}"
@@ -593,32 +647,29 @@ if isinstance(data, dict) and 'items' in data:
             break
 if not isinstance(obj, dict):
     sys.exit(0)
-print('%s\t%s\t%s' % (
+print('%s\t%s' % (
     obj.get('cluster_id', '') or '',
     obj.get('release_id', '') or '',
-    obj.get('database_id', '') or '',
 ))
 " 2>/dev/null || true)
-  local cluster release database
-  IFS=$'\t' read -r cluster release database <<< "$parsed" || true
+  local cluster release
+  IFS=$'\t' read -r cluster release <<< "$parsed" || true
   [[ -z "${E2E_CLUSTER_ID:-}" && -n "$cluster" ]] && E2E_CLUSTER_ID="$cluster"
   [[ -z "${E2E_RELEASE_ID:-}" && -n "$release" ]] && E2E_RELEASE_ID="$release"
-  [[ -z "${E2E_DATABASE_ID:-}" && -n "$database" ]] && E2E_DATABASE_ID="$database"
 }
 
-# Print a gateway create body that reuses the seeded cluster/release/database ids.
+# Print a gateway create body that reuses the seeded cluster/release ids.
 e2e_gateway_create_body() {
   local name="${1:?gateway name required}"
   GW_NAME="$name" E2E_OIDC_ISSUER="$E2E_OIDC_ISSUER" \
     E2E_OIDC_CLIENT_ID="$E2E_OIDC_CLIENT_ID" \
     E2E_CLUSTER_ID="${E2E_CLUSTER_ID}" \
-    E2E_RELEASE_ID="${E2E_RELEASE_ID}" E2E_DATABASE_ID="${E2E_DATABASE_ID:-}" python3 -c "
+    E2E_RELEASE_ID="${E2E_RELEASE_ID}" python3 -c "
 import json, os
 body = {
     'name': os.environ['GW_NAME'],
     'cluster_id': os.environ['E2E_CLUSTER_ID'],
     'release_id': os.environ['E2E_RELEASE_ID'],
-    'database_id': os.environ.get('E2E_DATABASE_ID', ''),
     'oidc': json.dumps({
         'issuer': os.environ['E2E_OIDC_ISSUER'],
         'audience': os.environ['E2E_OIDC_CLIENT_ID'],
@@ -654,21 +705,20 @@ e2e_wait_gateway_running() {
 }
 
 # Parse a gateway create/get JSON. Sets _CREATE_KIND (OK|ERROR|PARSE), _CREATE_ID,
-# _CREATE_NAMESPACE, _CREATE_DATABASE_ID (or error code/reason in the ERROR case).
+# _CREATE_NAMESPACE (or error code/reason in the ERROR case).
 e2e_parse_gateway_response() {
   local json="${1:-}"
   _CREATE_KIND=""
   _CREATE_ID=""
   _CREATE_NAMESPACE=""
-  _CREATE_DATABASE_ID=""
-  IFS=$'\t' read -r _CREATE_KIND _CREATE_ID _CREATE_NAMESPACE _CREATE_DATABASE_ID <<< "$(echo "$json" | python3 -c "
+  IFS=$'\t' read -r _CREATE_KIND _CREATE_ID _CREATE_NAMESPACE <<< "$(echo "$json" | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print('PARSE\t\t\t'); sys.exit(0)
+    print('PARSE\t\t'); sys.exit(0)
 if d.get('kind') == 'Error':
-    print('ERROR\t%s\t%s\t' % (d.get('code', ''), d.get('reason', ''))); sys.exit(0)
-print('OK\t%s\t%s\t%s' % (d.get('id', ''), d.get('namespace', ''), d.get('database_id', '')))
+    print('ERROR\t%s\t%s' % (d.get('code', ''), d.get('reason', ''))); sys.exit(0)
+print('OK\t%s\t%s' % (d.get('id', ''), d.get('namespace', '')))
 " 2>/dev/null)" || true
 }

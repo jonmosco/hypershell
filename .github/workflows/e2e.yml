@@ -149,13 +149,23 @@ jobs:
           echo "wait_control_plane=false" >> "${GITHUB_OUTPUT}"
           echo "wait_web_console=false"   >> "${GITHUB_OUTPUT}"
 
+          # Shared e2e-relevant gate for pull_request and merge_group. detect-
+          # components tracks api_server, control_plane, e2e, and pr_test
+          # (broad: Makefile, deploy, tests, workflow files). Web-console is
+          # narrower: only Konflux CEL paths, so an SDK/lockfile-only change
+          # does not spin Kind. merge_group uses the batch diff against
+          # merge_group.base_sha, so a docs PR batched with a component change
+          # still runs.
+          detect_e2e_relevant=false
+          if [[ "${DETECT_API_SERVER:-false}" == "true" || \
+                "${DETECT_CONTROL_PLANE:-false}" == "true" || \
+                "${DETECT_E2E:-false}" == "true" || \
+                "${DETECT_PR_TEST:-false}" == "true" ]]; then
+            detect_e2e_relevant=true
+          fi
+
           case "${EVENT_NAME}" in
             pull_request)
-              api_changed="${DETECT_API_SERVER:-false}"
-              cp_changed="${DETECT_CONTROL_PLANE:-false}"
-              e2e_changed="${DETECT_E2E:-false}"
-              pr_test_changed="${DETECT_PR_TEST:-false}"
-
               # Determine which components need a Konflux-built image. These
               # patterns MUST mirror each component's pull-request Konflux CEL
               # trigger in .tekton/hypershell-<component>-main-pull-request.yaml.
@@ -184,9 +194,7 @@ jobs:
               if grep -qE '^components/web-console/|^packages/gateway-management-ui/|^\.tekton/hypershell-web-console-main-pull-request\.yaml$' <<<"${changed_files}"; then wc_konflux=true; fi
 
               e2e_relevant=false
-              if [[ "${api_changed}" == "true" || "${cp_changed}" == "true" || \
-                    "${e2e_changed}" == "true" || "${pr_test_changed}" == "true" || \
-                    "${wc_konflux}" == "true" ]]; then
+              if [[ "${detect_e2e_relevant}" == "true" || "${wc_konflux}" == "true" ]]; then
                 e2e_relevant=true
               fi
 
@@ -278,7 +286,19 @@ jobs:
               # require target_branch == "main" and never fire here, so mirror
               # the pull_request path: use on-merge-queue-<merge_sha> for each
               # component the merge queue rebuilt and the stable baseline image for the
-              # rest. Always run e2e -- this is the merge gate.
+              # rest.
+              #
+              # Same e2e-relevant skip as pull_request, against the merge batch
+              # (detect-components and detect-konflux already diff
+              # merge_group.base_sha...github.sha). Kind remains the merge-queue
+              # gate when those paths change; a docs-only batch must not occupy
+              # three Kind runners. Tests CI Gate is the required check, so a
+              # skipped Kind job does not leave the queue pending.
+              if [[ "${detect_e2e_relevant}" != "true" && "${KONFLUX_WEB_CONSOLE}" != "true" ]]; then
+                echo "No e2e-relevant components changed in merge batch"
+                echo "should_run=false" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
               tag="on-merge-queue-${PUSH_SHA}"
               api_img="${baseline_api}"
               cp_img="${baseline_cp}"
@@ -368,14 +388,10 @@ jobs:
 
 
   e2e-kind:
-    name: Kind (${{ matrix.database-provider }})
+    name: Kind
     needs: plan-images
     if: needs.plan-images.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        database-provider: [deployment, cnpg, external]
     # This job now also absorbs the Konflux build wait that plan-images used to
     # hold: kind-up runs first and overlaps the remote build, the
     # wait-on-check-action steps then block for whatever build time is left (up
@@ -406,9 +422,6 @@ jobs:
 
       - name: Create Kind cluster with OIDC
         env:
-          # Exercise both the default per-gateway Deployment path and the
-          # explicitly selected CNPG path through the full E2E workflow.
-          DATABASE_PROVIDER: ${{ matrix.database-provider }}
           KIND_ENABLE_OIDC: "true"
           # Deploy Jaeger and point the web-console BFF at it so the browser
           # trace verification below has a collector to export to (WEB-TRACE-10).
@@ -510,7 +523,6 @@ jobs:
       # is rejected, rather than surfacing later as a confusing discovery miss.
       - name: Seed platform resources
         env:
-          DATABASE_PROVIDER: ${{ matrix.database-provider }}
           SEED_STRICT: "true"
         run: make kind-seed
 
@@ -520,8 +532,6 @@ jobs:
           E2E_OPENSHELL_INSTALL: always
           # Test the candidate installer before its public main URL is available.
           OPENSHELL_INSTALL_SCRIPT_URL: file://${{ github.workspace }}/scripts/install-openshell.sh
-          # Mirror the provider used to create this matrix job's cluster.
-          DATABASE_PROVIDER: ${{ matrix.database-provider }}
           E2E_PROVISION_TIMEOUT: "300"
           E2E_SANDBOX_TIMEOUT: "180"
           # Force plain, non-graphical output from the openshell CLI. Off a TTY
