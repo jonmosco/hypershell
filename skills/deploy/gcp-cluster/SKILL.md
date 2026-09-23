@@ -210,7 +210,7 @@ The `deploy/openshift` overlay (base for all cloud deployments) sets:
 
 - `GATEWAY_INGRESS_MODE=route` - use OpenShift Routes, not Gateway API
 - `GATEWAY_API_BASE_DOMAIN=apps.<cluster>.<id>.openshiftapps.com`
-- `deploy/base/platform-resources/controller-rbac.yaml` - cluster-wide RBAC for tenant reconciliation
+- `deploy/base/controller-rbac.yaml` - cluster-wide RBAC for tenant reconciliation
 
 **Upgrade to `:latest` images** (the pinned digest images lack OIDC support):
 
@@ -295,7 +295,7 @@ BASE_DOMAIN="apps.<cluster>.<id>.openshiftapps.com"
 SESSION_SECRET=$(openssl rand -hex 32)
 
 cd deploy
-oc apply -f deploy/base/applications/web-console.yaml
+oc kustomize base/web-console.yaml | oc apply -f -   # or apply web-console.yaml directly
 
 oc -n hypershell set env deploy/hypershell-web-console \
   OIDC_ISSUER="https://keycloak-keycloak.$BASE_DOMAIN/realms/hypershell" \

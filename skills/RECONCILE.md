@@ -180,7 +180,7 @@ The first gap analysis found a race between the event-driven reconciler and the 
 | GC-2 | Confidential console Keycloak client | Present | - | `control-plane/internal/keycloak/client.go`, `gateway/console.go` | - |
 | GC-3 | Stable console credential Secret | Present | - | `control-plane/internal/gateway/console.go` | - |
 | GC-4 | Console Deployment | Present | - | `control-plane/internal/gateway/console.go` | - |
-| GC-5 | Service and mode-selected HTTP exposure | Present | - | `control-plane/internal/gateway/console.go`, `deploy/base/platform-resources/controller-rbac.yaml` | GC-W1 |
+| GC-5 | Service and mode-selected HTTP exposure | Present | - | `control-plane/internal/gateway/console.go`, `deploy/base/controller-rbac.yaml` | GC-W1 |
 | GC-6 | Console NetworkPolicies | Present | The policy source uses the configured ingress namespace and supports both ingress controllers. | `control-plane/internal/gateway/console.go` | - |
 | GC-7 | Console lifecycle and cleanup | Present | - | `control-plane/internal/gateway/{console.go,reconciler.go}`, `reconciler/health.go` | GC-W1 |
 | GC-8 | Provisioning atomicity and idempotency | Present | - | `control-plane/internal/gateway/console.go`, `internal/keycloak/client.go` | - |
@@ -208,7 +208,7 @@ The first gap analysis found a race between the event-driven reconciler and the 
 | OS-10 | Blessed OpenShift Overlay | Partial | Namespace parameterization, Routes, SCC RoleBindings; `API_ENV=development_oidc` in the overlay (not `oc set env`); gateway base domain discovered from the shared Gateway listener (not `GATEWAY_API_BASE_DOMAIN`). Drift-check CI job deferred. | `deploy/openshift/`, `rewrite-namespaces.py` | OS-W2 |
 | OS-11 | OpenShift CI Workflow Shape | Missing | Intentionally deferred: not local-dev lifecycle | - | Future |
 | OS-12 | Cluster Infrastructure Prerequisites | Present | `make openshift-up` fails fast when the shared Gateway is missing or not Programmed. GatewayClass is cluster-scoped and not GET-checked (developers typically cannot read it). | `drivers/openshift.sh` `check_infrastructure` | OS-W2 |
-| OS-13 | Cluster-Scoped Permissions + SCC/RBAC posture | Present | Default applies prefixed overlay ClusterRole then ClusterRoleBinding. If ClusterRole create is Forbidden, bind the prefixed CRB to existing ClusterRole `hypershell-controller` (replace immutable roleRef if needed). Never touches unprefixed `hypershell-controller`. Down deletes this env's prefixed ClusterRole/CRB. | `rewrite-namespaces.py`, `drivers/openshift.sh` `apply_cluster_rbac`, `deploy/base/platform-resources/controller-rbac.yaml` | OS-W2 |
+| OS-13 | Cluster-Scoped Permissions + SCC/RBAC posture | Present | Default applies prefixed overlay ClusterRole then ClusterRoleBinding. If ClusterRole create is Forbidden, bind the prefixed CRB to existing ClusterRole `hypershell-controller` (replace immutable roleRef if needed). Never touches unprefixed `hypershell-controller`. Down deletes this env's prefixed ClusterRole/CRB. | `rewrite-namespaces.py`, `drivers/openshift.sh` `apply_cluster_rbac`, `deploy/base/controller-rbac.yaml` | OS-W2 |
 | OS-14 | Standalone Seed Command (`make openshift-seed`) | Missing | Seeds domain resources into an existing environment without re-applying the overlay; stops when environment is absent; always seeds (ignores `SKIP_SEED`); honors `SEED_STRICT`; idempotent | - | Future |
 | OS-15 | Lifecycle Library Unit Tests (`make openshift-test`) | Missing | No-cluster unit/static harness covering pure helpers, namespace rewriter, and source-level safety invariants (teardown==down, never delete unprefixed `hypershell-controller` RBAC, swaps never use internal registry) | - | Future |
 
@@ -219,7 +219,7 @@ Local-dev lifecycle (`make openshift-up` / `down` / component swaps) is implemen
 | # | Requirement | Status | Gap | Code Location | Wave |
 |---|-------------|--------|-----|---------------|------|
 | SA-1 | Synchronous provisioning and one-time delivery | Present | - | `plugins/serviceAccounts/`, `pkg/keycloak/service_accounts.go` | SA-W1..W3 |
-| SA-2 | Federated Keycloak is the identity system of record | Present | - | `deploy/base/applications/api-server.yaml`, `pkg/keycloak/service_accounts.go` | SA-W3 |
+| SA-2 | Federated Keycloak is the identity system of record | Present | - | `deploy/base/api-server.yaml`, `pkg/keycloak/service_accounts.go` | SA-W3 |
 | SA-3 | Client Credentials token issuance | Present | - | `pkg/keycloak/service_accounts.go`, lifecycle sweep | SA-W3 |
 | SA-4 | Single-gateway isolation | Present | - | `pkg/keycloak/service_accounts.go` | SA-W3 |
 | SA-5 | User-selected, RBAC-capped OpenShell role | Present | - | `pkg/rbac/authorization.go`, `plugins/serviceAccounts/service.go` | SA-W3 |
@@ -315,7 +315,7 @@ Local-dev lifecycle (`make openshift-up` / `down` / component swaps) is implemen
 
 | # | Requirement | Status | Gap | Code Location | Wave |
 |---|-------------|--------|-----|---------------|------|
-| D1 | Admin Credential Mount | Present | Files read from `GATEWAY_DATABASE_ADMIN_DIR` on every operation; Secret volume in `deploy/base/platform-resources/controller.yaml` | `gateway/database.go`, `config/config.go` | EXT-DB ✅ |
+| D1 | Admin Credential Mount | Present | Files read from `GATEWAY_DATABASE_ADMIN_DIR` on every operation; Secret volume in `deploy/base/controller.yaml` | `gateway/database.go`, `config/config.go` | EXT-DB ✅ |
 | D2 | Startup Precondition | Present | Required files, PEM `sslrootcert`, port range and `sslmode=verify-full` validated; `log.Fatalf` on failure; no connection at startup | `cmd/hypershell-controller/main.go`, `gateway/database.go` | EXT-DB ✅ |
 | D3 | Per-Gateway Database Provisioning | Present | `CREATE ROLE ... LOGIN`, `GRANT gw_<id> TO <admin>`, `CREATE DATABASE ... OWNER`, `REVOKE/GRANT CONNECT`; password reuse + `ALTER ROLE` repair | `gateway/database.go` | EXT-DB ✅ |
 | D4 | Gateway Credentials Secret (uri, sslmode=require) | Present | Tenant Secret carries `sslmode=require` and `uri` with no `sslrootcert`; no admin values. Helm chart's `server.externalDbSecret` reads only the `uri` key | `gateway/database.go` | EXT-DB ✅ |
@@ -417,7 +417,7 @@ Local-dev lifecycle (`make openshift-up` / `down` / component swaps) is implemen
 | # | Requirement | Status | Gap | Code Location | Wave |
 |---|-------------|--------|-----|---------------|------|
 | DASH-01 | Gateway phase Prometheus collector (`hypershell_gateways_total`) | Present | - | `plugins/gateways/metrics.go`, `dao.go:CountByPhase` | - |
-| DASH-02 | Metrics server bind `0.0.0.0:4433` | Present | - | `deploy/base/applications/api-server.yaml` | - |
+| DASH-02 | Metrics server bind `0.0.0.0:4433` | Present | - | `deploy/base/api-server.yaml` | - |
 | DASH-03 | Prometheus Operator and instance | Present | - | `deploy/kind/prometheus-operator/prometheus-operator-bundle.yaml`, `deploy/base/prometheus/` | - |
 | DASH-04 | ServiceMonitor scrape configuration | Present | - | `deploy/base/prometheus/servicemonitor.yaml` | - |
 | DASH-05 | BFF metrics proxy `GET /api/metrics/gateways` | Present | - | `bff/src/metrics-gateways.ts`, `bff/src/app.ts`, `bff/test/metrics-gateways.test.ts` | - |

@@ -41,7 +41,7 @@ $ARGUMENTS
 ## Source of truth
 
 The **authoritative** current version pins live in the control-plane deployment
-manifest `deploy/base/platform-resources/controller.yaml` as environment
+manifest `deploy/base/controller.yaml` as environment
 variables:
 
 ```yaml
@@ -70,7 +70,7 @@ grep -rn  "<OLD_VERSION>" . | grep -v '\.git/'      # must return only intention
 
 | File | What to change | Notes |
 |------|----------------|-------|
-| `deploy/base/platform-resources/controller.yaml` | `GATEWAY_IMAGE`, `GATEWAY_SUPERVISOR_IMAGE` env vars | **Source of truth** - change here first |
+| `deploy/base/controller.yaml` | `GATEWAY_IMAGE`, `GATEWAY_SUPERVISOR_IMAGE` env vars | **Source of truth** - change here first |
 | `specs/platform/data-model.spec.md` | `supervisor_image` default | Spec citation |
 | `specs/platform/openshell-gateway.spec.md` | gateway + supervisor defaults | Spec citation (multiple) |
 | `specs/platform/openshell-gateway-credentials.spec.md` | example manifests | Spec citation |
@@ -135,7 +135,7 @@ to the footprint table.
    feature that overlaps something HyperShell hand-rolls). Surface every
    `needs-decision` item to the user before finalizing - do not silently absorb it.
 
-3. **Bump the pins.** Edit `deploy/base/platform-resources/controller.yaml` first, then sweep the rest of the
+3. **Bump the pins.** Edit `deploy/base/controller.yaml` first, then sweep the rest of the
    [Version footprint](#version-footprint). Per the repo convention *"Image
    references must match across the stack"*, grep all overlays and manifests too:
 
@@ -154,7 +154,7 @@ to the footprint table.
    - **Sandbox API version**: confirm the `agents.x-k8s.io` API version the new
      gateway requires still matches the RBAC and manifests
      (`components/control-plane/manifests/gateway/rbac.yaml`,
-     `.../networkpolicy.yaml`, `deploy/base/platform-resources/controller-rbac.yaml`).
+     `.../networkpolicy.yaml`, `deploy/base/controller-rbac.yaml`).
    - **Credential drivers**: if upstream changed the pluggable credential storage
      surface, re-check `ValidateCredentialDriverConfig` and the credentials spec.
    - **PKI / TLS / Route**: if upstream shipped ingress/PKI features, evaluate
@@ -190,7 +190,7 @@ does, the item is `needs-decision`:
 | Surface | Why it matters | Where HyperShell depends on it |
 |---------|----------------|--------------------------------|
 | Gateway/supervisor config schema (TOML) | Control plane renders `gateway.toml` | `manifests/gateway/configmap.yaml`, `internal/gateway/config.go` |
-| Sandbox CR / `agents.x-k8s.io` API version | Gateway manages sandboxes; RBAC grants on it | `manifests/gateway/rbac.yaml`, `networkpolicy.yaml`, `deploy/base/platform-resources/controller-rbac.yaml` |
+| Sandbox CR / `agents.x-k8s.io` API version | Gateway manages sandboxes; RBAC grants on it | `manifests/gateway/rbac.yaml`, `networkpolicy.yaml`, `deploy/base/controller-rbac.yaml` |
 | Credential storage drivers | HyperShell selects/validates drivers | `ValidateCredentialDriverConfig`, `openshell-gateway-credentials.spec.md` |
 | gRPC/proto surface | API server + control plane speak gRPC | `components/api-server/proto/` |
 | Gateway/supervisor CLI flags & env | Control plane sets them | `configmap.yaml`, deployment manifests |
