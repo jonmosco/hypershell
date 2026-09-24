@@ -50,8 +50,9 @@ except OSError:
 #     The only sudo-free way to strip ::1 is the container's own single-stack
 #     resolver (*.localhost -> 127.0.0.1 inside the netns); editing /etc/hosts
 #     would need sudo, which the e2e suite must never require.
-# scripts/kind/openshell-container.sh runs the Linux CLI in a container sharing a
-# socat forwarder's netns on the kind network (see that script's header).
+# scripts/kind/openshell-container.sh runs the Linux CLI in a container on the
+# kind network with --add-host entries pointing gateway/OIDC hostnames at the
+# cloud-provider-kind Envoy LB IP (see that script's header).
 #
 # IPv4-only Linux (CI) keeps the fast native-binary path: no ::1 in the answer,
 # nothing to strip. Any explicit OPENSHELL_BIN override is honored. Guarded to
@@ -379,6 +380,7 @@ _driver_acquire_oidc_token() {
           -d "client_id=${E2E_OIDC_SA_CLIENT_ID}"
           -d "client_secret=${E2E_OIDC_SA_CLIENT_SECRET}"
           -d "subject_token=${subject_token}"
+          -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token"
         )
         # The CI admin identity is the hypershell-e2e service account, which
         # owns gateways it creates. Impersonating the seeded admin user
